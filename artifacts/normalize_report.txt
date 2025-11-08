@@ -1,0 +1,3 @@
+== NORMALIZE + CSR ==
+U=162541 I=32720 NNZ=24945870
+out=artifacts/matrix_user_csr

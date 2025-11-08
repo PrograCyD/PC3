@@ -1,0 +1,20 @@
+# CSVs originales
+data/*.csv
+data/*.txt
+
+# Artefactos de procesamiento
+artifacts/*.json
+artifacts/*.bin
+artifacts/*.csv
+
+# Binarios compilados
+*.exe
+*.out
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Archivos temporales
+*.log
+*.tmp

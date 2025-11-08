@@ -1,0 +1,18 @@
+== FILTRADO MovieLens 25M ==
+
+Criterio aplicado: conservar películas con ≥5 ratings.
+
+Filas originales     : 25000095
+Filas retenidas      : 24945870
+Filas eliminadas     : 54225 (0.22%)
+
+Películas totales    : 59047
+Películas retenidas  : 32720
+Películas eliminadas : 26327 (44.59%)
+
+Usuarios en limpio   : 162541 (usuarios con ≥1 rating retenido)
+
+Justificación del umbral:
+- Con menos de 5 ratings por película, coseno y Pearson son inestables (poco soporte conjunto).
+- Mantener solo ítems con suficiente señal reduce ruido y costo computacional.
+- Este recorte es para el cómputo de similitudes; la UI puede seguir mostrando metadata completa de movies.

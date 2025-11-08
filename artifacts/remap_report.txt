@@ -1,0 +1,5 @@
+== REMAP ==
+Usuarios (U): 162541
+Items (I): 32720
+Ratings (NNZ): 24945870
+Salida triplets: artifacts/ratings_ui.csv

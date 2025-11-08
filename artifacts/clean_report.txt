@@ -1,0 +1,56 @@
+== INSPECCIÓN MovieLens 25M ==
+
+Filas totales          : 25000095
+Filas válidas          : 25000095
+Nulos                  : 0
+Fuera de rango         : 0
+Pasos inválidos        : 0
+Duplicados (consecut.) : 0
+
+Usuarios distintos     : 162541
+Películas (ratings)    : 59047
+Películas (movies.csv) : 62423
+
+-- Distribución de ratings (paso 0.5) --
+  0.5 : 393068
+  1.0 : 776815
+  1.5 : 399490
+  2.0 : 1640868
+  2.5 : 1262797
+  3.0 : 4896928
+  3.5 : 3177318
+  4.0 : 6639798
+  4.5 : 2200539
+  5.0 : 3612474
+
+-- Distribución por estrellas enteras (1–5) --
+  1★ : 1169883
+  2★ : 2040358
+  3★ : 6159725
+  4★ : 9817116
+  5★ : 5813013
+
+-- Actividad por usuario (número de películas calificadas por usuario) --
+min=20 max=32202 avg=153.81
+  0-4    : 0
+  5-9    : 0
+  10-19  : 0
+  20-49  : 60049
+  50-99  : 38600
+  100+   : 63892
+
+-- Actividad por película (número de ratings por película) --
+min=1 max=81491 avg=423.39
+  0-4    : 26327
+  5-9    : 8390
+  10-19  : 5900
+  20-49  : 5254
+  50-99  : 2850
+  100+   : 10326
+
+-- Insights / umbrales sugeridos --
+Usuarios con <5 ratings   : 0 (0.00%) — en ML-25M debería ser ~0.
+Usuarios con ≥100 ratings : 63892 (39.31%)
+Películas con <5 ratings  : 26327 (44.59%)
+Películas con <10 ratings : 34717 (58.80%)
+Películas con ≥100 ratings: 10326 (17.49%)

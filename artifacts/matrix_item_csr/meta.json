@@ -1,0 +1,10 @@
+{
+  "users": 162541,
+  "items": 32720,
+  "nnz": 24945870,
+  "dtypes": {
+    "indptr": "int64",
+    "indices": "int32",
+    "data": "float32"
+  }
+}

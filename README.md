@@ -129,60 +129,107 @@ Además, persistimos los mapas para consumo por la API/UI:
 
 ---
 
-## 4.3 Normalización + Matriz dispersa CSR (normalize.go)
+### 4.3 Normalización + Matriz Dispersa CSR (normalize.go)
 
-### 4.3.1 ¿Qué es “centrar por usuario”?
-Cada usuario `u` tiene un sesgo propio (algunos puntúan alto, otros bajo). Para evitar que ese sesgo **distorsione la similitud**, transformamos cada rating:
+### 4.3.1 ¿Qué hace este proceso?
 
+El script `normalize.go` realiza la **normalización de los ratings** y la **construcción de matrices dispersas (CSR)** para representar de forma eficiente los datos de usuarios e ítems.  
+En esta versión, se incorporó la posibilidad de generar **centrado por usuario, centrado por ítem o ambos** mediante el parámetro `--axis`.
+
+#### Entrada principal
+- `artifacts/ratings_ui.csv` → columnas: `uIdx, iIdx, rating`
+
+#### Salidas principales (según el eje seleccionado)
+
+| Eje | Archivos generados | Descripción |
+|-----|--------------------|--------------|
+| **user** | `user_means.csv` y `matrix_user_csr/*` | Centrado por usuario: \( r'_{u,i} = r_{u,i} - \mu_u \) |
+| **item** | `item_means.csv` y `matrix_item_csr/*` | Centrado por ítem: \( r'_{u,i} = r_{u,i} - \mu_i \) |
+| **both** | Genera ambas versiones | Recomendado para usar tanto Pearson user-based como item-based |
+
+### 4.3.2 ¿Qué es “centrar por usuario” y “centrar por ítem”?
+
+Cada usuario o ítem tiene un sesgo propio (algunos puntúan alto, otros bajo). Para evitar que ese sesgo **distorsione la similitud**, se aplica un centrado que resta la media correspondiente:
+
+#### a) Centrado por usuario
 \[
-\mu_u \;=\; \frac{1}{n_u}\sum_{i \in I(u)} r_{u,i}
-\qquad\qquad
-r'_{u,i} \;=\; r_{u,i} - \mu_u
+\mu_u = \frac{1}{n_u}\sum_{i \in I(u)} r_{u,i}
+\qquad
+r'_{u,i} = r_{u,i} - \mu_u
+\]
+
+#### b) Centrado por ítem
+\[
+\mu_i = \frac{1}{n_i}\sum_{u \in U(i)} r_{u,i}
+\qquad
+r'_{u,i} = r_{u,i} - \mu_i
+\]
+
+Donde:
+- \( \mu_u, \mu_i \): medias de usuario o ítem  
+- \( n_u, n_i \): número de valoraciones por usuario o ítem  
+- \( r'_{u,i} \): rating centrado (desviación respecto a la media)
+
+Este centrado es fundamental para **Pearson**, ya que la correlación mide la relación entre **desviaciones respecto a la media**.  
+En cambio, **Coseno** y **Jaccard** no requieren normalización, ya que se basan en la forma del vector o la co-ocurrencia binaria.
+
+### 4.3.3 ¿Por qué usar formato CSR (Compressed Sparse Row)?
+
+La matriz usuario–ítem contiene millones de celdas vacías. Para optimizar el almacenamiento y acceso, se usa el formato **CSR**, que guarda solo las entradas no nulas.  
+Este formato permite iterar rápidamente por las filas (usuarios o ítems).
+
+| Archivo | Tipo | Contenido | Descripción |
+|----------|------|------------|--------------|
+| `indptr.bin` | `int64` (len = filas+1) | Punteros de inicio/fin de cada fila | Define los límites de cada usuario o ítem |
+| `indices.bin` | `int32` (len = NNZ) | Índices de columna | Identifica a qué ítem o usuario pertenece cada valor |
+| `data.bin` | `float32` (len = NNZ) | Ratings centrados \( r'_{u,i} \) | Valores normalizados |
+| `meta.json` | JSON | `{users, items, nnz, dtypes}` | Metadatos del CSR |
+| `*_means.csv` | CSV | Medias por usuario o ítem | Necesario para reconstruir predicciones |
+| `normalize_report.txt` | TXT | Resumen general | Incluye conteos y rutas de salida |
+
+**Ejemplo de dimensiones finales** (según `normalize_report.txt`):
+- Usuarios (U): 162,541  
+- Ítems (I): 32,720  
+- Ratings (NNZ): 24,945,870
+
+### 4.3.4 Cómo se usarán las matrices
+
+#### Acceso por usuario (CSR)
+```go
+for k := indptr[u]; k < indptr[u+1]; k++ {
+    i := indices[k]  // índice del ítem
+    r := data[k]     // r' = r - mu[u]
+}
+```
+
+#### Acceso por ítem (CSR invertido)
+```go
+for k := indptr[i]; k < indptr[i+1]; k++ {
+    u := indices[k]  // índice del usuario
+    r := data[k]     // r' = r - mu[i]
+}
+```
+
+#### Ejemplo de reconstrucción de predicción (Pearson)
+\[
+\widehat{r}_{u,i} = \mu_u +
+\frac{\sum_{v \in N_k(u)} s(u,v) \cdot r'_{v,i}}
+{\sum_{v \in N_k(u)} |s(u,v)|}
 \]
 
 donde:
-- \( \mu_u \): media de usuario `u`
-- \( n_u \): # de ítems calificados por `u`
-- \( r'_{u,i} \): rating **centrado** (desviación respecto a la media del usuario)
+- \( s(u,v) \): similitud entre usuarios (o entre ítems)
+- \( N_k(u) \): los k vecinos más similares
 
-> Este centrado es especialmente coherente con **Pearson** (correlación entre desviaciones) y también ayuda al **Coseno** (reduce sesgos).
+#### Ejecución recomendada
+```bash
+go run -tags normalize ./cmd/preprocess/normalize.go --axis=both
+```
 
-Guardamos las medias en:
-- `artifacts/user_means.csv`  → columnas: `uIdx,mean`
-
-### 4.3.2 ¿Por qué usar formato CSR?
-La matriz usuario–ítem es **dispersa** (muchas celdas vacías). El formato **CSR (Compressed Sparse Row)** permite almacenar **solo las entradas no nulas** y acceder rápidamente a las filas (usuarios).
-
-Definimos tres arrays binarios:
-
-| Archivo | Tipo | Contenido | Uso |
-|--------|------|-----------|-----|
-| `indptr.bin` | `int64` (len = U+1) | Punteros de inicio/fin por usuario. La fila `u` va de `indptr[u]` a `indptr[u+1]-1`. | Iterar **rápido** por las películas calificadas por un usuario. |
-| `indices.bin` | `int32` (len = NNZ) | Para cada entrada no nula, el **índice de columna** `iIdx`. | Saber qué ítem corresponde a cada dato. |
-| `data.bin` | `float32` (len = NNZ) | Los **ratings centrados** \( r'_{u,i} \). | Valores con los que se calculan similitudes. |
-
-Metadatos complementarios:
-- `meta.json` → `{users: U, items: I, nnz: NNZ, dtypes}`  
-- `normalize_report.txt` → resumen del proceso.
-
-**Números finales** (ver `normalize_report.txt`):
-- \( U = 162{,}541 \), \( I = 32{,}720 \), \( \text{NNZ} = 24{,}945{,}870 \)
-
-### 4.3.3 Cómo se usarán en los algoritmos
-- **Acceso por usuario** (CSR):
-  ```go
-  for k := indptr[u]; k < indptr[u+1]; k++ {
-      i := indices[k]  // iIdx
-      r := data[k]     // r' = r - mu[u]
-  }
-  ```
-- **Predicción (reconstrucción)** típica con vecinos (ej. Pearson):
-  \[
-  \widehat{r}_{u,i} \;=\; \mu_u \;+\; 
-  \frac{\sum_{v \in N_k(u)} \, s(u,v) \cdot r'_{v,i}}
-       {\sum_{v \in N_k(u)} |\,s(u,v)\,|}
-  \]
-  donde \( s(u,v) \) es la similitud (Pearson/Coseno) y \( N_k(u) \) los \(k\) vecinos.
+Esto generará las dos estructuras necesarias para:
+- **User-Pearson** → centrado por usuario  
+- **Item-Pearson** → centrado por ítem  
+- **Item-Cosine / Item-Jaccard** → sin centrado (usan ratings_ui.csv)
 
 ---
 

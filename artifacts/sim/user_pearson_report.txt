@@ -1,0 +1,17 @@
+== PEARSON USER-BASED (secuencial, muestreado sobre CSR centrado) ==
+pct_users / pct_items :   10% / 10%
+Usuarios totales (U)  :   162541
+Tripletas usadas (r') :   279094
+Pares u-v actualizados:   239502215
+Similitudes retenidas :   28710746
+Líneas escritas (CSV) :   287019
+Parámetros            :   k=20  min_co=3
+
+Tiempos:
+  Cargar/Invertir CSR :   147.4353ms
+  Acumular pares      :   36.4395021s
+  Top-K por usuario   :   19.5453048s
+  Escribir CSV        :   165.0912ms
+  TOTAL               :   56.2973334s
+Salida:
+  artifacts/sim/user_topk_pearson.csv

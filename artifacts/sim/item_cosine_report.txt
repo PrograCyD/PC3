@@ -1,0 +1,15 @@
+== COSENO ITEM-BASED (secuencial, muestreado) ==
+pct_users / pct_items :   10% / 10%
+Usuarios usados       :   16107
+Tripletas leídas ok   :   279094
+Pares i-j actualizados:   8084204
+Líneas escritas (CSV) :   17851
+Parámetros            :   k=20  min_co=3
+
+Tiempos:
+  Acumular por usuario:   3.5792519s
+  Top-K por ítem      :   47.6932ms
+  Escribir CSV        :   3.7146ms
+  TOTAL               :   3.6306597s
+Salida:
+  artifacts/sim/item_topk_cosine.csv

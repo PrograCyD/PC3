@@ -1,0 +1,17 @@
+== JACCARD ITEM-BASED (secuencial, muestreado) ==
+pct_users / pct_items :   100% / 25%
+Usuarios usados       :   162525
+Items usados          :   8178
+Tripletas leídas ok   :   6429919
+Pares i-j actualizados:   475873280
+Similitudes retenidas :   9276448
+Líneas escritas (CSV) :   163475
+Parámetros            :   k=20  min_co=3
+
+Tiempos:
+  Construir por usuario:   3.0307061s
+  Acumular intersecciones: 24.3965879s
+  Escribir CSV          :   4.55811s
+  TOTAL                 :   31.985404s
+Salida:
+  artifacts/sim/item_topk_jaccard.csv

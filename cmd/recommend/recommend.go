@@ -4,26 +4,29 @@
 package main
 
 /*
-RECOMMEND + EVALUATION (secuencial)
-- Genera un hold-out 10% por usuario para test (en memoria).
+RECOMMEND + EVALUATION (secuencial, con cronometraje)
+- Split hold-out por usuario (test_ratio).
 - Predice con:
     * user-based + Pearson (usa user_topk_pearson.csv y user_means.csv)
     * item-based + Coseno  (usa item_topk_cosine.csv)
 - Calcula MAE y RMSE.
+- Mide tiempos por fase y escribe un reporte en artifacts/reports/.
 
 Entradas:
-  - artifacts/ratings_ui.csv          (uIdx,iIdx,rating)
+  - artifacts/ratings_ui.csv
   - artifacts/sim/user_topk_pearson.csv   o   artifacts/sim/item_topk_cosine.csv
-  - artifacts/user_means.csv          (solo modelo user-based)
+  - artifacts/user_means.csv  (solo para model=user)
 
-Parámetros:
+Flags:
   --model=user|item
   --sim=path/to/sim.csv
   --test_ratio=0.1
-  --k_eval=10   (opcional: límite de vecinos a usar en predicción; por defecto usa todos del CSV)
+  --k_eval=0        (si >0, límite de vecinos a usar)
+  --report=""       (ruta opcional; por defecto artifacts/reports/recommend_<model>.txt)
 
-Salida (consola):
-  - MAE, RMSE y conteo de pares evaluados
+Salida:
+  - Consola: MAE, RMSE, tiempos y throughput
+  - Reporte: artifacts/reports/recommend_<model>.txt
 */
 
 import (
@@ -34,6 +37,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -46,38 +50,42 @@ type edge struct {
 	to int
 	w  float64
 }
-
-// 1) Cargar ratings por usuario y por ítem
 type ur struct {
 	i int
 	r float64
-}
+} // ratings por usuario
 type ir struct {
 	u int
 	r float64
-}
+} // ratings por item
 
 func main() {
-	var model string
-	var simPath string
+	var model, simPath, reportPath string
 	var testRatio float64
 	var kEval int
+
 	flag.StringVar(&model, "model", "user", "user | item")
 	flag.StringVar(&simPath, "sim", "", "ruta del CSV de similitud")
 	flag.Float64Var(&testRatio, "test_ratio", 0.1, "proporción de test por usuario")
-	flag.IntVar(&kEval, "k_eval", 0, "si >0, usa como límite de vecinos al predecir")
+	flag.IntVar(&kEval, "k_eval", 0, "si >0, límite de vecinos al predecir")
+	flag.StringVar(&reportPath, "report", "", "ruta de reporte (opcional)")
 	flag.Parse()
 	if simPath == "" {
 		panic("--sim requerido (ruta a user_topk_pearson.csv o item_topk_cosine.csv)")
 	}
+	if reportPath == "" {
+		_ = os.MkdirAll("artifacts/reports", 0o755)
+		reportPath = filepath.Join("artifacts", "reports", fmt.Sprintf("recommend_%s.txt", model))
+	}
 
+	t0 := time.Now()
+
+	// 1) Cargar ratings en memoria
 	users := make(map[int][]ur) // u -> [(i,r)]
 	items := make(map[int][]ir) // i -> [(u,r)]
-
 	f, _ := os.Open(tripletsPath)
 	rd := csv.NewReader(bufio.NewReader(f))
 	_, _ = rd.Read() // header
-	maxU, maxI := 0, 0
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -91,20 +99,15 @@ func main() {
 		r, _ := strconv.ParseFloat(rec[2], 64)
 		users[u] = append(users[u], ur{i, r})
 		items[i] = append(items[i], ir{u, r})
-		if u+1 > maxU {
-			maxU = u + 1
-		}
-		if i+1 > maxI {
-			maxI = i + 1
-		}
 	}
 	f.Close()
+	tLoadRatings := time.Since(t0)
 
 	// 2) Cargar similitudes
-	sim := make(map[int][]edge) // nodo -> vecinos ordenados (como fueron escritos)
+	sim := make(map[int][]edge) // nodo -> vecinos (ya ordenados)
 	sf, _ := os.Open(simPath)
 	sr := csv.NewReader(bufio.NewReader(sf))
-	_, _ = sr.Read()
+	_, _ = sr.Read() // header
 	for {
 		rec, err := sr.Read()
 		if err != nil {
@@ -119,10 +122,13 @@ func main() {
 		sim[a] = append(sim[a], edge{to: b, w: w})
 	}
 	sf.Close()
+	tLoadSim := time.Since(t0) - tLoadRatings
 
-	// 3) Medias de usuario (si modelo user-based)
+	// 3) Medias de usuario (solo model=user)
 	means := make(map[int]float64)
+	var tLoadMeans time.Duration
 	if model == "user" {
+		m0 := time.Now()
 		mf, _ := os.Open(userMeansPath)
 		mr := csv.NewReader(bufio.NewReader(mf))
 		_, _ = mr.Read()
@@ -139,24 +145,27 @@ func main() {
 			means[u] = m
 		}
 		mf.Close()
+		tLoadMeans = time.Since(m0)
 	}
 
 	// 4) Split hold-out por usuario
+	s0 := time.Now()
 	rand.Seed(time.Now().UnixNano())
 	type testPair struct {
 		u, i int
 		r    float64
 	}
 	var test []testPair
-	train := make(map[int]map[int]float64) // u -> i -> r
+	train := make(map[int]map[int]float64) // u -> (i->r)
+
 	for u, lst := range users {
+		if len(lst) < 2 {
+			continue
+		} // necesita al menos 2 para train/test
 		perm := rand.Perm(len(lst))
 		szTest := int(math.Max(1, math.Round(testRatio*float64(len(lst)))))
-		if szTest > len(lst)-1 { // deja al menos 1 en train
+		if szTest >= len(lst) {
 			szTest = len(lst) - 1
-		}
-		if szTest < 1 {
-			szTest = 1
 		}
 		tr := make(map[int]float64, len(lst)-szTest)
 		for k, idx := range perm {
@@ -169,45 +178,42 @@ func main() {
 		}
 		train[u] = tr
 	}
+	tSplit := time.Since(s0)
 
-	// 5) Predicción y métricas
+	// 5) Predicción y métricas (esto es el "tiempo de evaluación de métricas")
+	p0 := time.Now()
 	var absSum, sqSum float64
 	var n int
 
 	for _, t := range test {
 		var pred float64
 		if model == "user" {
-			// vecinos de u que hayan valorado i
 			nu := sim[t.u]
 			if kEval > 0 && len(nu) > kEval {
 				nu = nu[:kEval]
 			}
 			var num, den float64
 			for _, e := range nu {
-				v := e.to
-				// buscar rating de v sobre i
-				rv := ratingFromList(items[t.i], v) // búsqueda lineal sobre item->[(u,r)]
-				if rv <= 0 {                        // no valoró (MovieLens ratings >= 0.5)
+				rv := ratingFromList(items[t.i], e.to) // rating de vecino e.to sobre item i
+				if rv <= 0 {
 					continue
-				}
-				num += e.w * (rv - means[v])
+				} // MovieLens ratings >= 0.5
+				num += e.w * (rv - means[e.to])
 				den += math.Abs(e.w)
 			}
 			if den == 0 {
-				pred = means[t.u] // fallback: media del usuario
+				pred = means[t.u]
 			} else {
 				pred = means[t.u] + num/den
 			}
 			pred = clamp(pred, 0.5, 5.0)
 		} else {
-			// item-based: vecinos del ítem i
 			ni := sim[t.i]
 			if kEval > 0 && len(ni) > kEval {
 				ni = ni[:kEval]
 			}
 			var num, den float64
-			// ítems que u ha valorado
-			uj := train[t.u]
+			uj := train[t.u] // ratings de u en train
 			for _, e := range ni {
 				if rj, ok := uj[e.to]; ok {
 					num += e.w * rj
@@ -215,23 +221,58 @@ func main() {
 				}
 			}
 			if den == 0 {
-				// fallback: media de los ratings del usuario en train
 				pred = meanMap(uj)
 			} else {
 				pred = num / den
 			}
 			pred = clamp(pred, 0.5, 5.0)
 		}
-
 		err := t.r - pred
 		absSum += math.Abs(err)
 		sqSum += err * err
 		n++
 	}
-
+	tPredict := time.Since(p0)
 	mae := absSum / float64(n)
 	rmse := math.Sqrt(sqSum / float64(n))
+	throughput := float64(n) / tPredict.Seconds() // preds/s
+
+	tTotal := time.Since(t0)
+
+	// Consola
 	fmt.Printf("[MODEL=%s] eval=%d  MAE=%.4f  RMSE=%.4f\n", strings.ToUpper(model), n, mae, rmse)
+	fmt.Printf("Times: load_ratings=%s  load_sim=%s  load_means=%s  split=%s  predict=%s  TOTAL=%s\n",
+		tLoadRatings, tLoadSim, tLoadMeans, tSplit, tPredict, tTotal)
+	fmt.Printf("Throughput: %.0f preds/s (k_eval=%d)\n", throughput, kEval)
+
+	// Reporte
+	rep := fmt.Sprintf(
+		`== RECOMMEND + EVAL (%s) ==
+Sim CSV          : %s
+Ratings CSV      : %s
+User means       : %v
+test_ratio       : %.2f
+k_eval           : %d
+
+Evaluated pairs  : %d
+MAE              : %.4f
+RMSE             : %.4f
+Throughput       : %.0f preds/s
+
+Tiempos:
+  Cargar ratings : %s
+  Cargar sim     : %s
+  Cargar medias  : %s
+  Split hold-out : %s
+  Predecir       : %s
+  TOTAL          : %s
+`,
+		strings.ToUpper(model), simPath, tripletsPath, model == "user",
+		testRatio, kEval, n, mae, rmse, throughput,
+		tLoadRatings, tLoadSim, tLoadMeans, tSplit, tPredict, tTotal,
+	)
+	_ = os.WriteFile(reportPath, []byte(rep), 0o644)
+	fmt.Printf("Reporte -> %s\n", reportPath)
 }
 
 func ratingFromList(lst []ir, u int) float64 {
@@ -242,7 +283,6 @@ func ratingFromList(lst []ir, u int) float64 {
 	}
 	return 0
 }
-
 func clamp(x, a, b float64) float64 {
 	if x < a {
 		return a

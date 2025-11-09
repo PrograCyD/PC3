@@ -1,0 +1,19 @@
+== RECOMMEND + EVAL (USER) ==
+Sim CSV          : artifacts/sim/user_topk_pearson.csv
+Ratings CSV      : artifacts/ratings_ui.csv
+User means       : true
+test_ratio       : 0.10
+k_eval           : 20
+
+Evaluated pairs  : 2501060
+MAE              : 0.7333
+RMSE             : 0.9499
+Throughput       : 143008 preds/s
+
+Tiempos:
+  Cargar ratings : 4.803357s
+  Cargar sim     : 45.5235ms
+  Cargar medias  : 30.0182ms
+  Split hold-out : 807.7002ms
+  Predecir       : 17.4888993s
+  TOTAL          : 23.1754982s

@@ -4,24 +4,29 @@
 package main
 
 /*
-NORMALIZACIÓN + CONSTRUCCIÓN CSR (centrado por usuario)
+NORMALIZACIÓN + CSR por USUARIO e ÍTEM (opcionalmente ambas)
 
 Entrada:
-  - artifacts/ratings_ui.csv  // (uIdx,iIdx,rating)
+  - artifacts/ratings_ui.csv  // (uIdx,iIdx,rating) ordenado por uIdx
 
-Salidas:
-  - artifacts/user_means.csv                   (uIdx,mean)
-  - artifacts/matrix_user_csr/indptr.bin      (int64, len=U+1)
-  - artifacts/matrix_user_csr/indices.bin     (int32, len=NNZ)
-  - artifacts/matrix_user_csr/data.bin        (float32, len=NNZ)  // r' = r - mean(u)
-  - artifacts/matrix_user_csr/meta.json       {U,I,NNZ,dtypes}
-  - artifacts/normalize_report.txt            // resumen
+Salidas (según --axis):
+  - artifacts/user_means.csv
+  - artifacts/matrix_user_csr/{indptr.bin,indices.bin,data.bin,meta.json}
+
+  - artifacts/item_means.csv
+  - artifacts/matrix_item_csr/{indptr.bin,indices.bin,data.bin,meta.json}
+
+Notas:
+  - Pearson(user-based) usa matrix_user_csr (centrado por usuario).
+  - Pearson(item-based) usa matrix_item_csr (centrado por ítem).
+  - Coseno item-based puede seguir usando ratings_ui.csv (no requiere centrar).
 */
 
 import (
 	"bufio"
 	"encoding/csv"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,14 +36,28 @@ import (
 
 const (
 	inTriplets = "artifacts/ratings_ui.csv"
-	outMeans   = "artifacts/user_means.csv"
-	outCSRDir  = "artifacts/matrix_user_csr"
-	outIndptr  = "artifacts/matrix_user_csr/indptr.bin"
-	outIndices = "artifacts/matrix_user_csr/indices.bin"
-	outData    = "artifacts/matrix_user_csr/data.bin"
-	outMeta    = "artifacts/matrix_user_csr/meta.json"
-	normReport = "artifacts/normalize_report.txt"
+
+	// USER
+	userMeansPath = "artifacts/user_means.csv"
+	userDir       = "artifacts/matrix_user_csr"
+	userIndptr    = "artifacts/matrix_user_csr/indptr.bin"
+	userIndices   = "artifacts/matrix_user_csr/indices.bin"
+	userData      = "artifacts/matrix_user_csr/data.bin"
+	userMeta      = "artifacts/matrix_user_csr/meta.json"
+
+	// ITEM
+	itemMeansPath = "artifacts/item_means.csv"
+	itemDir       = "artifacts/matrix_item_csr"
+	itemIndptr    = "artifacts/matrix_item_csr/indptr.bin"
+	itemIndices   = "artifacts/matrix_item_csr/indices.bin"
+	itemData      = "artifacts/matrix_item_csr/data.bin"
+	itemMeta      = "artifacts/matrix_item_csr/meta.json"
 )
+
+type trip struct {
+	u, i int
+	r    float64
+}
 
 type meta struct {
 	Users  int `json:"users"`
@@ -52,32 +71,22 @@ type meta struct {
 }
 
 func main() {
-	if err := os.MkdirAll(outCSRDir, 0o755); err != nil {
-		fmt.Printf("ERROR creando %s: %v\n", outCSRDir, err)
-		return
-	}
+	var axis string
+	flag.StringVar(&axis, "axis", "both", "user | item | both")
+	flag.Parse()
 
-	// PASO 1: leer triplets y calcular U, I, NNZ, y acumular sumas y counts por uIdx
-	type row struct {
-		u, i int
-		r    float64
-	}
-	rows := make([]row, 0, 1_000_000)
-
+	// --- PASO 1: cargar triplets una vez y colectar tamaños ---
 	f, err := os.Open(inTriplets)
 	if err != nil {
 		fmt.Printf("ERROR abriendo %s: %v\n", inTriplets, err)
 		return
 	}
+	defer f.Close()
 	rd := csv.NewReader(bufio.NewReader(f))
-	rd.FieldsPerRecord = -1
 	_, _ = rd.Read() // header
 
-	var U, I, NNZ int
-	// como viene ordenado por uIdx, iremos detectando máximos
-	userSum := make(map[int]float64, 200000)
-	userCnt := make(map[int]int, 200000)
-
+	rows := make([]trip, 0, 1_000_000)
+	U, I, NNZ := 0, 0, 0
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -89,12 +98,10 @@ func main() {
 		if len(rec) < 3 {
 			continue
 		}
-
 		u, _ := strconv.Atoi(rec[0])
 		i, _ := strconv.Atoi(rec[1])
 		r, _ := strconv.ParseFloat(rec[2], 64)
-
-		rows = append(rows, row{u, i, r})
+		rows = append(rows, trip{u, i, r})
 		NNZ++
 		if u+1 > U {
 			U = u + 1
@@ -102,81 +109,142 @@ func main() {
 		if i+1 > I {
 			I = i + 1
 		}
-		userSum[u] += r
-		userCnt[u]++
-	}
-	f.Close()
-
-	// PASO 2: medias por usuario
-	if err := writeMeans(outMeans, userSum, userCnt, U); err != nil {
-		fmt.Printf("ERROR escribiendo medias: %v\n", err)
-		return
 	}
 
-	means := make([]float64, U)
-	for u := 0; u < U; u++ {
-		if c := userCnt[u]; c > 0 {
-			means[u] = userSum[u] / float64(c)
+	// --- USER: medias + CSR centrado por usuario (sólo si aplica) ---
+	if axis == "user" || axis == "both" {
+		if err := os.MkdirAll(userDir, 0o755); err != nil {
+			fmt.Printf("ERROR creando %s: %v\n", userDir, err)
+			return
 		}
-	}
 
-	// PASO 3: construir CSR (indptr, indices, data)
-	indptr := make([]int64, U+1)
-	indices := make([]int32, NNZ)
-	data := make([]float32, NNZ)
-
-	// Como rows está ordenado por u (viene de remap), podemos llenar en una pasada
-	var currU int
-	var pos int
-	for _, rw := range rows {
-		for currU <= rw.u {
-			indptr[currU] = int64(pos)
-			currU++
-			if currU > rw.u {
-				break
+		userSum := make([]float64, U)
+		userCnt := make([]int, U)
+		for _, t := range rows {
+			userSum[t.u] += t.r
+			userCnt[t.u]++
+		}
+		if err := writeMeansDense(userMeansPath, userSum, userCnt); err != nil {
+			fmt.Printf("ERROR escribiendo user_means: %v\n", err)
+			return
+		}
+		userMean := make([]float64, U)
+		for u := 0; u < U; u++ {
+			if userCnt[u] > 0 {
+				userMean[u] = userSum[u] / float64(userCnt[u])
 			}
 		}
-		indices[pos] = int32(rw.i)
-		data[pos] = float32(rw.r - means[rw.u]) // centrado por usuario
-		pos++
-	}
-	// cerrar último usuario
-	for currU <= U {
-		indptr[currU] = int64(pos)
-		currU++
+
+		// Como ratings_ui.csv viene ordenado por u, el CSR se arma en una pasada.
+		indptr := make([]int64, U+1)
+		indices := make([]int32, NNZ)
+		data := make([]float32, NNZ)
+		var currU, pos int
+		for _, t := range rows {
+			for currU <= t.u {
+				indptr[currU] = int64(pos)
+				currU++
+				if currU > t.u {
+					break
+				}
+			}
+			indices[pos] = int32(t.i)
+			data[pos] = float32(t.r - userMean[t.u])
+			pos++
+		}
+		for currU <= U {
+			indptr[currU] = int64(pos)
+			currU++
+		}
+
+		if err := writeBin(userIndptr, indptr); err != nil {
+			fmt.Println("ERROR user indptr:", err)
+			return
+		}
+		if err := writeBin(userIndices, indices); err != nil {
+			fmt.Println("ERROR user indices:", err)
+			return
+		}
+		if err := writeBin(userData, data); err != nil {
+			fmt.Println("ERROR user data:", err)
+			return
+		}
+
+		mt := meta{Users: U, Items: I, NNZ: NNZ}
+		mt.DTypes.Indptr, mt.DTypes.Indices, mt.DTypes.Data = "int64", "int32", "float32"
+		jb, _ := json.MarshalIndent(mt, "", "  ")
+		_ = os.WriteFile(userMeta, jb, 0o644)
+
+		fmt.Printf("[OK] USER CSR -> U=%d I=%d NNZ=%d  out=%s\n", U, I, NNZ, userDir)
 	}
 
-	// PASO 4: persistir binarios + meta + reporte
-	if err := writeBin(outIndptr, indptr); err != nil {
-		fmt.Printf("ERROR indptr: %v\n", err)
-		return
-	}
-	if err := writeBin(outIndices, indices); err != nil {
-		fmt.Printf("ERROR indices: %v\n", err)
-		return
-	}
-	if err := writeBin(outData, data); err != nil {
-		fmt.Printf("ERROR data: %v\n", err)
-		return
-	}
+	// --- ITEM: medias + CSR centrado por ítem (sólo si aplica) ---
+	if axis == "item" || axis == "both" {
+		if err := os.MkdirAll(itemDir, 0o755); err != nil {
+			fmt.Printf("ERROR creando %s: %v\n", itemDir, err)
+			return
+		}
 
-	mt := meta{Users: U, Items: I, NNZ: NNZ}
-	mt.DTypes.Indptr = "int64"
-	mt.DTypes.Indices = "int32"
-	mt.DTypes.Data = "float32"
-	jb, _ := json.MarshalIndent(mt, "", "  ")
-	_ = os.WriteFile(outMeta, jb, 0o644)
+		itemSum := make([]float64, I)
+		itemCnt := make([]int, I)
+		for _, t := range rows {
+			itemSum[t.i] += t.r
+			itemCnt[t.i]++
+		}
+		if err := writeMeansDense(itemMeansPath, itemSum, itemCnt); err != nil {
+			fmt.Printf("ERROR escribiendo item_means: %v\n", err)
+			return
+		}
+		itemMean := make([]float64, I)
+		for i := 0; i < I; i++ {
+			if itemCnt[i] > 0 {
+				itemMean[i] = itemSum[i] / float64(itemCnt[i])
+			}
+		}
 
-	rep := fmt.Sprintf(
-		"== NORMALIZE + CSR ==\nU=%d I=%d NNZ=%d\nout=%s\n", U, I, NNZ, outCSRDir,
-	)
-	_ = os.WriteFile(normReport, []byte(rep), 0o644)
+		// Construir CSR por ítem (filas=ítems). Hacemos "contar y volcar":
+		indptr := make([]int64, I+1)
+		for i := 0; i < I; i++ {
+			indptr[i+1] = indptr[i] + int64(itemCnt[i])
+		}
+		indices := make([]int32, NNZ) // aquí guardamos uIdx
+		data := make([]float32, NNZ)  // r - mean(item)
+		// cursores de escritura por ítem
+		writePos := make([]int64, I)
+		copy(writePos, indptr)
 
-	fmt.Printf("[OK] CSR centrado por usuario creado: U=%d I=%d NNZ=%d\n", U, I, NNZ)
-	fmt.Printf("  indptr=%s\n  indices=%s\n  data=%s\n  meta=%s\n", outIndptr, outIndices, outData, outMeta)
+		for _, t := range rows {
+			p := writePos[t.i]
+			indices[p] = int32(t.u)
+			data[p] = float32(t.r - itemMean[t.i])
+			writePos[t.i]++
+		}
+
+		if err := writeBin(itemIndptr, indptr); err != nil {
+			fmt.Println("ERROR item indptr:", err)
+			return
+		}
+		if err := writeBin(itemIndices, indices); err != nil {
+			fmt.Println("ERROR item indices:", err)
+			return
+		}
+		if err := writeBin(itemData, data); err != nil {
+			fmt.Println("ERROR item data:", err)
+			return
+		}
+
+		mt := meta{Users: U, Items: I, NNZ: NNZ}
+		mt.DTypes.Indptr, mt.DTypes.Indices, mt.DTypes.Data = "int64", "int32", "float32"
+		jb, _ := json.MarshalIndent(mt, "", "  ")
+		_ = os.WriteFile(itemMeta, jb, 0o644)
+
+		fmt.Printf("[OK] ITEM CSR -> U=%d I=%d NNZ=%d  out=%s\n", U, I, NNZ, itemDir)
+	}
 }
 
-func writeMeans(path string, sum map[int]float64, cnt map[int]int, U int) error {
+// --- utilidades ---
+
+func writeMeansDense(path string, sum []float64, cnt []int) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -187,18 +255,18 @@ func writeMeans(path string, sum map[int]float64, cnt map[int]int, U int) error 
 	defer f.Close()
 	w := csv.NewWriter(bufio.NewWriter(f))
 	defer w.Flush()
-	_ = w.Write([]string{"uIdx", "mean"})
-	for u := 0; u < U; u++ {
-		var mean float64
-		if c := cnt[u]; c > 0 {
-			mean = sum[u] / float64(c)
+	_ = w.Write([]string{"idx", "mean"})
+	for i := 0; i < len(sum); i++ {
+		var m float64
+		if cnt[i] > 0 {
+			m = sum[i] / float64(cnt[i])
 		}
-		_ = w.Write([]string{strconv.Itoa(u), strconv.FormatFloat(mean, 'f', -1, 64)})
+		_ = w.Write([]string{strconv.Itoa(i), strconv.FormatFloat(m, 'f', -1, 64)})
 	}
 	return nil
 }
 
-// writeBin escribe cualquier slice primitivo en binario sin encabezado.
+// writeBin: guarda slices primitivos (int64, int32, float32) en little-endian
 func writeBin[T ~int64 | ~int32 | ~float32](path string, arr []T) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -208,39 +276,36 @@ func writeBin[T ~int64 | ~int32 | ~float32](path string, arr []T) error {
 		return err
 	}
 	defer f.Close()
-	// conversión a bytes sin copiar: iteramos y escribimos cada elemento
-	// (simple y seguro para tipos fijos)
+	var buf [8]byte
 	for _, v := range arr {
-		// escribe en little-endian estándar de Go
-		var buf [8]byte
 		switch any(v).(type) {
 		case int64:
 			x := any(v).(int64)
 			for i := 0; i < 8; i++ {
 				buf[i] = byte(x >> (8 * i))
 			}
-			_, err = f.Write(buf[:8])
+			if _, err = f.Write(buf[:8]); err != nil {
+				return err
+			}
 		case int32:
 			x := any(v).(int32)
 			for i := 0; i < 4; i++ {
 				buf[i] = byte(x >> (8 * i))
 			}
-			_, err = f.Write(buf[:4])
+			if _, err = f.Write(buf[:4]); err != nil {
+				return err
+			}
 		case float32:
-			x := any(v).(float32)
-			u := mathFloat32bits(x)
+			u := mathFloat32bits(any(v).(float32))
 			for i := 0; i < 4; i++ {
 				buf[i] = byte(u >> (8 * i))
 			}
-			_, err = f.Write(buf[:4])
-		}
-		if err != nil {
-			return err
+			if _, err = f.Write(buf[:4]); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func mathFloat32bits(f float32) uint32 {
-	return *(*uint32)(unsafe.Pointer(&f))
-}
+func mathFloat32bits(f float32) uint32 { return *(*uint32)(unsafe.Pointer(&f)) }

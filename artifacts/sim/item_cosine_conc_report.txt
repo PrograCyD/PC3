@@ -1,0 +1,19 @@
+== COSENO ITEM-BASED (concurrente) ==
+pct_users / pct_items   : 10% / 100%
+Workers (goroutines)    : 8
+
+Usuarios usados aprox.  : 16270
+Tripletas leídas ok     : 2579414
+Pares (i,j) acumulados  : 170896215
+Similitudes retenidas   : 225391
+Líneas escritas (CSV)   : 225391
+Parámetros              : k=20  min_co=3
+
+Tiempos:
+  Workers (acumular)    : 30.5925726s
+  Top-K por ítem        : 5.5362893s
+  Escribir CSV          : 0s
+  TOTAL                 : 36.1288619s
+
+Salida CSV:
+  artifacts/sim/item_topk_cosine_conc.csv

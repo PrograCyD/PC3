@@ -1,0 +1,13 @@
+== JACCARD ITEM-BASED (concurrente) ==
+Workers:                8
+pct_users / pct_items:  10% / 100%
+Tripletas leídas:       24945870
+Líneas escritas (CSV):  225391
+
+Tiempos:
+  Workers + reduce:     27.2518092s
+  Escribir CSV:         4.6950156s
+  TOTAL:                31.9468248s
+
+Salida:
+  artifacts/sim/item_topk_jaccard_conc.csv

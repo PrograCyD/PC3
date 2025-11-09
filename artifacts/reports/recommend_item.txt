@@ -1,19 +1,19 @@
 == RECOMMEND + EVAL (ITEM) ==
-Sim CSV          : artifacts/sim/item_topk_jaccard.csv
+Sim CSV          : artifacts/sim/item_topk_jaccard_conc.csv
 Ratings CSV      : artifacts/ratings_ui.csv
 User means       : false
 test_ratio       : 0.10
 k_eval           : 20
 
 Evaluated pairs  : 2501060
-MAE              : 0.7246
-RMSE             : 0.9463
-Throughput       : 376092 preds/s
+MAE              : 0.6839
+RMSE             : 0.9219
+Throughput       : 1384965 preds/s
 
 Tiempos:
-  Cargar ratings : 5.0108413s
-  Cargar sim     : 24.1069ms
+  Cargar ratings : 4.7778393s
+  Cargar sim     : 36.4968ms
   Cargar medias  : 0s
-  Split hold-out : 833.2117ms
-  Predecir       : 6.6501274s
-  TOTAL          : 12.5182873s
+  Split hold-out : 790.4288ms
+  Predecir       : 1.8058657s
+  TOTAL          : 7.4106306s

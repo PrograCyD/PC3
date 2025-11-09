@@ -1,0 +1,19 @@
+== PEARSON ITEM-BASED (concurrente) ==
+pct_users / pct_items   : 10% / 100%
+Workers (goroutines)    : 8
+
+Usuarios usados aprox.  : 16270
+Tripletas leídas ok     : 2579414
+Pares (i,j) acumulados  : 170896215
+Similitudes retenidas   : 223858
+Líneas escritas (CSV)   : 223858
+Parámetros              : k=20  min_co=3
+
+Tiempos:
+  Workers (acumular)    : 32.9526976s
+  Top-K por ítem        : 5.657087s
+  Escribir CSV          : 0s
+  TOTAL                 : 38.6097846s
+
+Salida CSV:
+  artifacts/sim/item_topk_pearson_conc.csv

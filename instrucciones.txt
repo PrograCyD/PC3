@@ -1,0 +1,373 @@
+PC3
+
+Para correr los comandos primero se tiene que crear una carpeta desde el origen que se llame data. 
+En esta se debe colocar movies.csv y ratings.csv previamente descargadas de MovieLens 25M
+
+Preprocesamiento
+go run cmd/preprocess/clean.go
+go run cmd/preprocess/remap.go
+go run cmd/preprocess/normalize.go
+	go run -tags normalize ./cmd/preprocess/normalize.go --axis=both
+	go run -tags normalize ./cmd/preprocess/normalize.go --axis=user
+	go run -tags normalize ./cmd/preprocess/normalize.go --axis=item
+
+
+Elección entre User-based o Item-based collaborative filtering
+Nota: en ambos casos existe el --mode=item o --mode=user , sin embargo para esta parte hemos hecho 
+
+Pearson User-based
+go run -tags algorithms ./cmd/algorithms/pearson.go --k=20 --min_co=3 --pct_users=10 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=user --sim=artifacts/sim/user_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --k=20 --min_co=3 --pct_users=10 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=user --sim=artifacts/sim/user_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --k=20 --min_co=3 --pct_users=25 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=user --sim=artifacts/sim/user_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --k=20 --min_co=3 --pct_users=100 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=user --sim=artifacts/sim/user_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+
+Cosine Item-based
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=25
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+
+
+
+Calculo de similitud de los diferentes algoritmos elegidos (secuencial)
+Cosine Similarity
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=25 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=50 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/cosine.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine.csv --test_ratio=0.1 --k_eval=20
+
+
+
+Pearson Correlation
+go run -tags algorithms ./cmd/algorithms/pearson.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --mode=item --k=20 --min_co=3 --pct_users=25 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --mode=item --k=20 --min_co=3 --pct_users=50 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/pearson.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson.csv --test_ratio=0.1 --k_eval=20
+
+
+
+
+Jaccard Index
+go run -tags algorithms ./cmd/algorithms/jaccard.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/jaccard.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=10
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/jaccard.go --mode=item --k=20 --min_co=3 --pct_users=10 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/jaccard.go --mode=item --k=20 --min_co=3 --pct_users=25 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/jaccard.go --mode=item --k=20 --min_co=3 --pct_users=50 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/algorithms/jaccard.go --mode=item --k=20 --min_co=3 --pct_users=100 --pct_items=100
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard.csv --test_ratio=0.1 --k_eval=20
+
+
+
+
+Calculo de similitud de los diferentes algoritmos elegidos (concurrente)
+
+======Cosine Similarity======
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/cosine_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_cosine_conc.csv --test_ratio=0.1 --k_eval=20
+
+
+
+
+
+
+
+======Pearson Correlation======
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/pearson_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_pearson_conc.csv --test_ratio=0.1 --k_eval=20
+
+
+
+
+
+======Jaccard Index======
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=10 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=10 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=10 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=25 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=50 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+======
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=10 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=20 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=30 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20
+
+go run -tags algorithms ./cmd/concurrent/jaccard_concurrent.go --k=20 --min_co=3 --pct_users=100 --pct_items=100 --workers=40 --shrink=20
+go run ./cmd/recommend/recommend.go --model=item --sim=artifacts/sim/item_topk_jaccard_conc.csv --test_ratio=0.1 --k_eval=20

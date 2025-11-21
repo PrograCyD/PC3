@@ -1,19 +1,21 @@
-== PEARSON ITEM-BASED (concurrente) ==
-pct_users / pct_items   : 10% / 100%
-Workers (goroutines)    : 8
+== PEARSON ITEM-BASED (concurrente, shardeado + shrinkage) ==
+pct_users / pct_items   : 10% / 10%
+Workers (goroutines)    : 40
+Shards globales         : 64
+Shrink (λ)              : 20
 
-Usuarios usados aprox.  : 16270
-Tripletas leídas ok     : 2579414
-Pares (i,j) acumulados  : 170896215
-Similitudes retenidas   : 223858
-Líneas escritas (CSV)   : 223858
+Usuarios usados aprox.  : 16107
+Tripletas leídas ok     : 279094
+Pares (i,j) acumulados  : 8084204
+Similitudes retenidas   : 16854
+Líneas escritas (CSV)   : 16854
 Parámetros              : k=20  min_co=3
 
 Tiempos:
-  Workers (acumular)    : 32.9526976s
-  Top-K por ítem        : 5.657087s
-  Escribir CSV          : 0s
-  TOTAL                 : 38.6097846s
+  Lectura + envío jobs  : 5.092659s
+  Top-K por ítem        : 71.1534ms
+  Escribir CSV          : 8.7986ms
+  TOTAL                 : 5.172611s
 
 Salida CSV:
   artifacts/sim/item_topk_pearson_conc.csv

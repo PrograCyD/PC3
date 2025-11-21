@@ -4,16 +4,26 @@ Ratings CSV      : artifacts/ratings_ui.csv
 User means       : false
 test_ratio       : 0.10
 k_eval           : 20
+k_metrics        : 20
+rel_threshold    : 4.00
+centered (item)  : false
 
 Evaluated pairs  : 2501060
-MAE              : 0.6839
-RMSE             : 0.9219
-Throughput       : 1384965 preds/s
+MAE              : 0.7433
+RMSE             : 0.9631
+
+Top-K metrics (por usuario):
+  Precision@K    : 0.6007
+  Recall@K       : 0.9079
+  NDCG@K         : 0.7796
+  HitRate@K      : 0.9469
+
+Throughput       : 304584 preds/s
 
 Tiempos:
-  Cargar ratings : 4.7778393s
-  Cargar sim     : 36.4968ms
+  Cargar ratings : 6.4302723s
+  Cargar sim     : 0s
   Cargar medias  : 0s
-  Split hold-out : 790.4288ms
-  Predecir       : 1.8058657s
-  TOTAL          : 7.4106306s
+  Split hold-out : 812.2498ms
+  Predecir       : 8.2113878s
+  TOTAL          : 15.4539099s

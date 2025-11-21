@@ -4,44 +4,63 @@
 package main
 
 /*
-JACCARD (Concurrente) — Item-Based y User-Based
+JACCARD (Concurrente, SOLO Item-Based, optimizado)
 
-Resumen:
-- Coef. de Jaccard: J(A,B) = |A ∩ B| / |A ∪ B|.
-- User-Based: A,B son conjuntos de ítems valorados por usuarios u,v (trabajamos sobre CSR por usuario).
-- Item-Based: A,B son conjuntos de usuarios que valoraron los ítems i,j (leemos ratings_ui.csv).
+Resumen
+-------
+- Trabaja con artifacts/ratings_ui.csv con filas: (uIdx, iIdx, rating), ordenado por usuario.
+- Para cada usuario u, consideramos el conjunto de ítems que ha valorado:
+    U(u) = { i | (u,i) en ratings }
 
-Concurrencia:
-- Patrón worker-pool + reduce con canales.
-- Se divide el espacio en sub-bloques:
-  * User-Based: iteramos por ítem (columna) y generamos pares de usuarios (submatrices horizontales).
-  * Item-Based: agrupamos canastas por usuario y generamos pares de ítems (submatrices verticales).
-- Cada worker acumula intersecciones locales, el hilo principal fusiona y calcula Top-K.
+- Para cada par de ítems (i,j):
+    inter(i,j) = | U(i) ∩ U(j) |
+    |U(i)|     = número de usuarios que valoran i
+    |U(j)|     = número de usuarios que valoran j
+    union      = |U(i)| + |U(j)| - inter(i,j)
 
-Entradas:
-- --mode=item  → artifacts/ratings_ui.csv (uIdx,iIdx,rating) ordenado por uIdx.
-- --mode=user  → artifacts/matrix_user_csr/{indptr.bin,indices.bin,data.bin}.
+    Jaccard(i,j) = inter / union
 
-Parámetros:
-- --mode=item|user
-- --k=20              (Top-K vecinos)
-- --min_co=3          (mínimo de co-ocurrencias)
-- --pct_users=100     (muestreo determinista por id de usuario)
-- --pct_items=100     (muestreo determinista por id de ítem)
-- --workers=8         (número de goroutines)
+- Filtro:
+    inter >= min_co
+    union > 0
 
-Salidas:
-- CSV de similitudes Top-K:
-  * item: artifacts/sim/item_topk_jaccard_conc.csv  (iIdx,jIdx,sim)
-  * user: artifacts/sim/user_topk_jaccard_conc.csv  (uIdx,vIdx,sim)
-- Reporte con tiempos y conteos:
-  * artifacts/sim/item_jaccard_conc_report.txt
-  * artifacts/sim/user_jaccard_conc_report.txt
+- Shrinkage opcional:
+    sim_shrunk = Jaccard * inter / (inter + shrink)
+  para penalizar pares con pocas co-ocurrencias.
+
+Concurrencia / performance
+--------------------------
+- PASO 1 (secuencial, rápido): una pasada al CSV para contar |U(i)| (itemCount[i]).
+- PASO 2 (concurrente):
+    * Se vuelve a leer el CSV agrupando las filas por usuario (canastas).
+    * Cada canasta (slice de ítems) se envía por canal jobs a un pool de workers.
+    * Cada worker recorre todos los pares (i,j) de la canasta y llama a updatePair:
+        - Tenemos numShards shards globales.
+        - Cada shard tiene map[i]map[j]*accJ + sync.Mutex.
+        - El shard se escoge por hash(i,j) ⇒ balance de carga y poca contención.
+    * No hay mapas locales ni fase de reduce costosa: todo se acumula en los shards.
+
+Parámetros
+----------
+  --k=20            Top-K vecinos por ítem
+  --min_co=3        mínimo de co-ocurrencias (inter) para considerar similitud
+  --pct_users=100   % de usuarios (muestreo determinista por uIdx)
+  --pct_items=100   % de ítems (muestreo determinista por iIdx)
+  --workers=8       número de goroutines
+  --shrink=0        shrinkage para Jaccard (0 = sin shrink)
+
+Entradas
+--------
+  artifacts/ratings_ui.csv   (uIdx,iIdx,rating)
+
+Salidas
+-------
+  artifacts/sim/item_topk_jaccard_conc.csv
+  artifacts/sim/item_jaccard_conc_report.txt
 */
 
 import (
 	"bufio"
-	"encoding/binary"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -50,32 +69,32 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+// ===== rutas de entrada/salida =====
+
 const (
-	inTriplets = "artifacts/ratings_ui.csv"
-
-	csrIndptrPath  = "artifacts/matrix_user_csr/indptr.bin"
-	csrIndicesPath = "artifacts/matrix_user_csr/indices.bin"
-
+	inTriplets    = "artifacts/ratings_ui.csv"
 	outItemTopK   = "artifacts/sim/item_topk_jaccard_conc.csv"
 	outItemReport = "artifacts/sim/item_jaccard_conc_report.txt"
-
-	outUserTopK   = "artifacts/sim/user_topk_jaccard_conc.csv"
-	outUserReport = "artifacts/sim/user_jaccard_conc_report.txt"
 )
+
+// ===== tipos comunes =====
 
 type kv struct {
 	j int
 	s float64
 }
 
+// acumulador para Jaccard item-item (solo intersección)
 type accJ struct {
 	inter int
 }
 
-// ---------- util: hash y muestreo determinista ----------
+// ===== utilidades =====
+
 func hash32(x int) uint32 {
 	h := uint32(2166136261)
 	v := uint32(x)
@@ -85,6 +104,7 @@ func hash32(x int) uint32 {
 	}
 	return h
 }
+
 func keepByPct(id int, pct int) bool {
 	if pct >= 100 {
 		return true
@@ -103,267 +123,176 @@ func topK(list []kv, k int) []kv {
 	return list
 }
 
-func ensureDirFor(path string) error {
-	return os.MkdirAll(filepath.Dir(path), 0o755)
+func writeTopKCSV(path string, header []string, rows func(write func([]string))) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(bufio.NewWriter(f))
+	defer w.Flush()
+
+	_ = w.Write(header)
+	rows(func(rec []string) { _ = w.Write(rec) })
+	return nil
 }
 
-// ---------- USER-BASED (CSR) ----------
-func runUserBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers int) (string, error) {
-	t0 := time.Now()
+// ===== estructura shardeada =====
 
-	indptr := readInt64(csrIndptrPath)
-	indices := readInt32(csrIndicesPath)
-	U := len(indptr) - 1
+// potencia de 2 para usar & en vez de %
+const numShards = 64
 
-	// Construir invertido: item -> []users y contar cardinalidades por usuario
-	maxI := 0
-	for _, x := range indices {
-		if int(x)+1 > maxI {
-			maxI = int(x) + 1
-		}
-	}
-	itemUsers := make([][]int, maxI)
-	userCount := make([]int, U) // |I(u)| SOBRE EL SUBCONJUNTO MUESTREADO
-
-	for u := 0; u < U; u++ {
-		if !keepByPct(u, pctUsers) {
-			continue
-		}
-		start, end := indptr[u], indptr[u+1]
-		for p := start; p < end; p++ {
-			i := int(indices[p])
-			if !keepByPct(i, pctItems) {
-				continue
-			}
-			itemUsers[i] = append(itemUsers[i], u)
-			userCount[u]++
-		}
-	}
-	tInv := time.Since(t0)
-
-	// Worker pool: divide items en chunks
-	type job struct{ lo, hi int }
-	jobs := make(chan job, workers)
-	type part struct{ m map[int]map[int]*accJ }
-	results := make(chan part, workers)
-
-	worker := func() {
-		local := make(map[int]map[int]*accJ)
-		for jb := range jobs {
-			for i := jb.lo; i < jb.hi; i++ {
-				users := itemUsers[i]
-				n := len(users)
-				for a := 0; a < n; a++ {
-					ua := users[a]
-					for b := a + 1; b < n; b++ {
-						ub := users[b]
-						m := local[ua]
-						if m == nil {
-							m = make(map[int]*accJ)
-							local[ua] = m
-						}
-						t := m[ub]
-						if t == nil {
-							t = &accJ{}
-							m[ub] = t
-						}
-						t.inter++
-					}
-				}
-			}
-		}
-		results <- part{m: local}
-	}
-
-	wg := sync.WaitGroup{}
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func() { defer wg.Done(); worker() }()
-	}
-	const chunk = 1024
-	for lo := 0; lo < maxI; lo += chunk {
-		hi := lo + chunk
-		if hi > maxI {
-			hi = maxI
-		}
-		jobs <- job{lo: lo, hi: hi}
-	}
-	close(jobs)
-	go func() { wg.Wait(); close(results) }()
-
-	// Reduce global
-	global := make(map[int]map[int]*accJ)
-	for part := range results {
-		for ua, m := range part.m {
-			G := global[ua]
-			if G == nil {
-				G = make(map[int]*accJ)
-				global[ua] = G
-			}
-			for ub, t := range m {
-				g := G[ub]
-				if g == nil {
-					G[ub] = &accJ{inter: t.inter}
-				} else {
-					g.inter += t.inter
-				}
-			}
-		}
-	}
-	tWork := time.Since(t0) - tInv
-
-	// Calcular Jaccard y Top-K
-	out := make(map[int][]kv)
-	var lines uint64
-	for u, m := range global {
-		cands := make([]kv, 0, len(m))
-		for v, t := range m {
-			if t.inter < minCo {
-				continue
-			}
-			a := userCount[u]
-			b := userCount[v]
-			if a == 0 || b == 0 {
-				continue
-			}
-			union := a + b - t.inter
-			if union <= 0 {
-				continue
-			}
-			sim := float64(t.inter) / float64(union)
-			cands = append(cands, kv{j: v, s: sim})
-		}
-		out[u] = topK(cands, k)
-	}
-	tTop := time.Since(t0) - tInv - tWork
-
-	if err := ensureDirFor(outUserTopK); err != nil {
-		return "", err
-	}
-	fw, _ := os.Create(outUserTopK)
-	w := csv.NewWriter(bufio.NewWriter(fw))
-	_ = w.Write([]string{"uIdx", "vIdx", "sim"})
-	for u, list := range out {
-		for _, p := range list {
-			_ = w.Write([]string{strconv.Itoa(u), strconv.Itoa(p.j), fmt.Sprintf("%.6f", p.s)})
-			lines++
-		}
-	}
-	w.Flush()
-	fw.Close()
-	tCSV := time.Since(t0) - tInv - tWork - tTop
-
-	rep := fmt.Sprintf(
-		`== JACCARD USER-BASED (concurrente) ==
-Usuarios (U):           %d
-Ítems (I):              %d
-Workers:                %d
-pct_users / pct_items:  %d%% / %d%%
-Líneas escritas (CSV):  %d
-
-Tiempos:
-  Invertir item->users: %s
-  Workers + reduce:     %s
-  Top-K:                %s
-  Escribir CSV:         %s
-  TOTAL:                %s
-
-Salida:
-  %s
-`, U, maxI, workers, pctUsers, pctItems, lines,
-		tInv, tWork, tTop, tCSV, time.Since(t0), outUserTopK)
-
-	_ = os.WriteFile(outUserReport, []byte(rep), 0o644)
-	return rep, nil
+type shard struct {
+	mu sync.Mutex
+	m  map[int]map[int]*accJ // i -> j -> accJ
 }
 
-// ---------- ITEM-BASED (ratings_ui.csv) ----------
-func runItemBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers int) (string, error) {
+func newShards() [numShards]*shard {
+	var s [numShards]*shard
+	for i := range s {
+		s[i] = &shard{m: make(map[int]map[int]*accJ)}
+	}
+	return s
+}
+
+// shardIndex en función de (i,j) (canonizado i<j)
+func shardIndex(i, j int) int {
+	if i > j {
+		i, j = j, i
+	}
+	h := hash32(i*73856093 ^ j*19349663)
+	return int(h & (numShards - 1))
+}
+
+// actualización de un par (i,j) dentro del shard correspondiente
+func updatePair(shards [numShards]*shard, ia, ib int) {
+	if ia == ib {
+		return
+	}
+	// canonicalizar (i<j) para no duplicar pares
+	if ia > ib {
+		ia, ib = ib, ia
+	}
+	idx := shardIndex(ia, ib)
+	s := shards[idx]
+
+	s.mu.Lock()
+	m := s.m[ia]
+	if m == nil {
+		m = make(map[int]*accJ)
+		s.m[ia] = m
+	}
+	t := m[ib]
+	if t == nil {
+		t = &accJ{}
+		m[ib] = t
+	}
+	t.inter++
+	s.mu.Unlock()
+}
+
+// ===== algoritmo concurrente ITEM-BASED (Jaccard) =====
+
+func runItemBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers, shrink int) (string, error) {
 	t0 := time.Now()
 
-	f, err := os.Open(inTriplets)
+	// === PASO 1: contar |U(i)| por ítem (itemCount[i]) ===
+	itemCount := make(map[int]int)
+
+	f1, err := os.Open(inTriplets)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	rd := csv.NewReader(bufio.NewReader(f))
-	_, _ = rd.Read() // header
+	rd1 := csv.NewReader(bufio.NewReader(f1))
+	_, _ = rd1.Read() // header
 
-	type rating struct{ i int }
-	type userBlock struct{ users [][]rating }
+	var tripletsCount uint64
 
-	jobs := make(chan userBlock, workers)
-	type part struct{ m map[int]map[int]*accJ }
-	results := make(chan part, workers)
+	for {
+		rec, er := rd1.Read()
+		if er != nil {
+			break
+		}
+		u, _ := strconv.Atoi(rec[0])
+		i, _ := strconv.Atoi(rec[1])
 
-	// Contaremos |U(i)| correctamente durante la lectura
-	itemCount := make(map[int]int)
+		if !keepByPct(u, pctUsers) || !keepByPct(i, pctItems) {
+			continue
+		}
+		itemCount[i]++
+		tripletsCount++
+	}
+	f1.Close()
+	tCount := time.Since(t0)
+
+	// === PASO 2: worker-pool + shards (pares por usuario) ===
+
+	f2, err := os.Open(inTriplets)
+	if err != nil {
+		return "", err
+	}
+	defer f2.Close()
+	rd2 := csv.NewReader(bufio.NewReader(f2))
+	_, _ = rd2.Read() // header
+
+	jobs := make(chan []int, workers*4)
+	shards := newShards()
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	var pairsUpdated uint64
+	var usersKept uint64
 
 	worker := func() {
-		local := make(map[int]map[int]*accJ)
-		for blk := range jobs {
-			for _, items := range blk.users {
-				for a := 0; a < len(items); a++ {
-					ia := items[a].i
-					for b := a + 1; b < len(items); b++ {
-						ib := items[b].i
-						m := local[ia]
-						if m == nil {
-							m = make(map[int]*accJ)
-							local[ia] = m
-						}
-						t := m[ib]
-						if t == nil {
-							t = &accJ{}
-							m[ib] = t
-						}
-						t.inter++
-					}
+		defer wg.Done()
+		for basket := range jobs {
+			n := len(basket)
+			for a := 0; a < n; a++ {
+				ia := basket[a]
+				for b := a + 1; b < n; b++ {
+					ib := basket[b]
+					updatePair(shards, ia, ib)
+					atomic.AddUint64(&pairsUpdated, 1)
 				}
 			}
 		}
-		results <- part{m: local}
 	}
 
-	wg := sync.WaitGroup{}
-	wg.Add(workers)
 	for w := 0; w < workers; w++ {
-		go func() { defer wg.Done(); worker() }()
+		go worker()
 	}
 
-	// Lectura + batching por usuarios
-	const usersPerBlock = 4096
-	block := userBlock{users: make([][]rating, 0, usersPerBlock)}
+	// lectura agrupando por usuario
 	var lastU = -1
-	var basket []rating
+	basket := make([]int, 0, 64)
 
 	emitUser := func() {
 		if len(basket) == 0 {
 			return
 		}
-		block.users = append(block.users, append([]rating(nil), basket...))
-		if len(block.users) >= usersPerBlock {
-			jobs <- block
-			block = userBlock{users: make([][]rating, 0, usersPerBlock)}
-		}
+		cp := make([]int, len(basket))
+		copy(cp, basket)
+		jobs <- cp
 		basket = basket[:0]
+		atomic.AddUint64(&usersKept, 1)
 	}
 
-	linesRead := 0
 	for {
-		rec, er := rd.Read()
+		rec, er := rd2.Read()
 		if er != nil {
-			if er.Error() == "EOF" {
-				break
-			}
-			continue
+			break
 		}
-		linesRead++
 		u, _ := strconv.Atoi(rec[0])
 		i, _ := strconv.Atoi(rec[1])
 
+		// aplicar los mismos filtros de muestreo
 		if !keepByPct(u, pctUsers) || !keepByPct(i, pctItems) {
-			// cerrar grupo al cambiar usuario aunque no se use éste
+			// cerrar canasta si cambiamos de usuario
 			if lastU != -1 && u != lastU {
 				emitUser()
 				lastU = u
@@ -373,154 +302,144 @@ func runItemBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers int) (s
 
 		if lastU == -1 {
 			lastU = u
-		}
-		if u != lastU {
+		} else if u != lastU {
 			emitUser()
 			lastU = u
 		}
-		basket = append(basket, rating{i: i})
-		itemCount[i]++ // |U(i)| sobre el subconjunto muestreado
+		basket = append(basket, i)
 	}
-	emitUser()
-	if len(block.users) > 0 {
-		jobs <- block
-	}
-	close(jobs)
-	go func() { wg.Wait(); close(results) }()
+	emitUser()  // último usuario
+	close(jobs) // no más trabajos
+	wg.Wait()   // esperar a todos los workers
+	tPairs := time.Since(t0) - tCount
 
-	// Reduce
-	global := make(map[int]map[int]*accJ)
-	for part := range results {
-		for ia, m := range part.m {
-			G := global[ia]
-			if G == nil {
-				G = make(map[int]*accJ)
-				global[ia] = G
-			}
-			for ib, t := range m {
-				g := G[ib]
-				if g == nil {
-					G[ib] = &accJ{inter: t.inter}
-				} else {
-					g.inter += t.inter
-				}
-			}
-		}
-	}
-	tWork := time.Since(t0)
+	// === PASO 3: calcular Jaccard (con shrink) y Top-K por ítem ===
 
-	// Calcular Jaccard y Top-K
 	out := make(map[int][]kv)
-	var lines uint64
-	for i, m := range global {
-		cands := make([]kv, 0, len(m))
-		for j, t := range m {
-			if t.inter < minCo {
-				continue
-			}
-			a := itemCount[i]
-			b := itemCount[j]
-			if a == 0 || b == 0 {
-				continue
-			}
-			union := a + b - t.inter
-			if union <= 0 {
-				continue
-			}
-			sim := float64(t.inter) / float64(union)
-			cands = append(cands, kv{j: j, s: sim})
-		}
-		out[i] = topK(cands, k)
-	}
+	var simsKept, lines uint64
 
-	if err := ensureDirFor(outItemTopK); err != nil {
+	for _, s := range shards {
+		s.mu.Lock()
+		for i, m := range s.m {
+			cands := make([]kv, 0, len(m))
+			countI := itemCount[i]
+			if countI == 0 {
+				continue
+			}
+			for j, t := range m {
+				if t.inter < minCo {
+					continue
+				}
+				countJ := itemCount[j]
+				if countJ == 0 {
+					continue
+				}
+				union := countI + countJ - t.inter
+				if union <= 0 {
+					continue
+				}
+				sim := float64(t.inter) / float64(union)
+				if sim <= 0 {
+					continue
+				}
+				// Shrinkage: sim_shrunk = sim * inter / (inter + shrink)
+				if shrink > 0 {
+					w := float64(t.inter) / (float64(t.inter) + float64(shrink))
+					sim *= w
+				}
+				cands = append(cands, kv{j: j, s: sim})
+			}
+			if len(cands) == 0 {
+				continue
+			}
+			cands = topK(cands, k)
+			out[i] = cands
+			simsKept += uint64(len(cands))
+		}
+		s.mu.Unlock()
+	}
+	tTop := time.Since(t0) - tCount - tPairs
+
+	// === PASO 4: escribir CSV ===
+
+	err = writeTopKCSV(outItemTopK, []string{"iIdx", "jIdx", "sim"}, func(write func([]string)) {
+		for i, list := range out {
+			for _, p := range list {
+				write([]string{
+					strconv.Itoa(i),
+					strconv.Itoa(p.j),
+					fmt.Sprintf("%.6f", p.s),
+				})
+				lines++
+			}
+		}
+	})
+	if err != nil {
 		return "", err
 	}
-	fw, _ := os.Create(outItemTopK)
-	w := csv.NewWriter(bufio.NewWriter(fw))
-	_ = w.Write([]string{"iIdx", "jIdx", "sim"})
-	for i, list := range out {
-		for _, p := range list {
-			_ = w.Write([]string{strconv.Itoa(i), strconv.Itoa(p.j), fmt.Sprintf("%.6f", p.s)})
-			lines++
-		}
-	}
-	w.Flush()
-	fw.Close()
-	tCSV := time.Since(t0) - tWork
+	tCSV := time.Since(t0) - tCount - tPairs - tTop
+
+	total := time.Since(t0)
 
 	rep := fmt.Sprintf(
-		`== JACCARD ITEM-BASED (concurrente) ==
-Workers:                %d
-pct_users / pct_items:  %d%% / %d%%
-Tripletas leídas:       %d
-Líneas escritas (CSV):  %d
+		`== JACCARD ITEM-BASED (concurrente, shardeado) ==
+pct_users / pct_items   : %d%% / %d%%
+Workers (goroutines)    : %d
+Shards globales         : %d
+Shrink                  : %d
+
+Usuarios usados aprox.  : %d
+Tripletas leídas (paso1): %d
+Pares (i,j) acumulados  : %d
+Similitudes retenidas   : %d
+Líneas escritas (CSV)   : %d
+Parámetros              : k=%d  min_co=%d
 
 Tiempos:
-  Workers + reduce:     %s
-  Escribir CSV:         %s
-  TOTAL:                %s
+  Paso 1: contar |U(i)|        : %s
+  Paso 2: workers (pares)      : %s
+  Paso 3: Top-K por ítem       : %s
+  Paso 4: Escribir CSV         : %s
+  TOTAL                        : %s
 
-Salida:
+Salida CSV:
   %s
-`, workers, pctUsers, pctItems, linesRead, lines,
-		tWork, tCSV, time.Since(t0), outItemTopK)
+`,
+		pctUsers, pctItems, workers, numShards, shrink,
+		usersKept, tripletsCount, pairsUpdated, simsKept, lines, k, minCo,
+		tCount, tPairs, tTop, tCSV, total,
+		outItemTopK,
+	)
 
-	_ = os.WriteFile(outItemReport, []byte(rep), 0o644)
+	if err := os.WriteFile(outItemReport, []byte(rep), 0o644); err != nil {
+		return "", err
+	}
 	return rep, nil
 }
 
-// ---------- MAIN ----------
+// ========= main =========
+
 func main() {
-	var mode string
 	var k, minCo int
-	var pctUsers, pctItems, workers int
-	flag.StringVar(&mode, "mode", "item", "item | user")
-	flag.IntVar(&k, "k", 20, "Top-K vecinos")
-	flag.IntVar(&minCo, "min_co", 3, "mínimo de co-ocurrencias")
-	flag.IntVar(&pctUsers, "pct_users", 100, "% de usuarios (0-100)")
-	flag.IntVar(&pctItems, "pct_items", 100, "% de ítems (0-100)")
-	flag.IntVar(&workers, "workers", 8, "número de goroutines/workers")
+	var pctUsers, pctItems int
+	var workers int
+	var shrink int
+
+	flag.IntVar(&k, "k", 20, "Top-K vecinos por ítem")
+	flag.IntVar(&minCo, "min_co", 3, "mínimo co-ocurrencias (inter)")
+	flag.IntVar(&pctUsers, "pct_users", 100, "% de usuarios a considerar (0-100)")
+	flag.IntVar(&pctItems, "pct_items", 100, "% de ítems a considerar (0-100)")
+	flag.IntVar(&workers, "workers", 8, "número de goroutines")
+	flag.IntVar(&shrink, "shrink", 0, "shrinkage para Jaccard (0 = sin shrink)")
 	flag.Parse()
 
-	var rep string
-	var err error
-	switch mode {
-	case "item":
-		rep, err = runItemBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers)
-	case "user":
-		rep, err = runUserBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers)
-	default:
-		panic("modo inválido: use --mode=item | --mode=user")
+	if err := os.MkdirAll("artifacts/sim", 0o755); err != nil {
+		panic(err)
 	}
+
+	rep, err := runItemBasedJaccardConcurrent(k, minCo, pctUsers, pctItems, workers, shrink)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Print(rep)
-}
-
-// ---------- util lectura binaria ----------
-func readInt64(path string) []int64 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	n := len(b) / 8
-	out := make([]int64, n)
-	for i := 0; i < n; i++ {
-		out[i] = int64(binary.LittleEndian.Uint64(b[i*8:]))
-	}
-	return out
-}
-func readInt32(path string) []int32 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	n := len(b) / 4
-	out := make([]int32, n)
-	for i := 0; i < n; i++ {
-		out[i] = int32(binary.LittleEndian.Uint32(b[i*4:]))
-	}
-	return out
 }

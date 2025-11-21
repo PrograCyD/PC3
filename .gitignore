@@ -7,6 +7,9 @@ artifacts/*.json
 artifacts/*.bin
 artifacts/*.csv
 
+# Similitudes generadas
+sim/*.csv
+
 # Binarios compilados
 *.exe
 *.out

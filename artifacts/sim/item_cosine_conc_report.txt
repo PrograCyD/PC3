@@ -1,19 +1,22 @@
-== COSENO ITEM-BASED (concurrente) ==
-pct_users / pct_items   : 10% / 100%
-Workers (goroutines)    : 8
+== COSENO ITEM-BASED (concurrente optimizado + shrinkage) ==
+pct_users / pct_items   : 100% / 100%
+Workers (goroutines)    : 40
+Shards globales         : 64
+Shrink (λ)              : 20
 
-Usuarios usados aprox.  : 16270
-Tripletas leídas ok     : 2579414
-Pares (i,j) acumulados  : 170896215
-Similitudes retenidas   : 225391
-Líneas escritas (CSV)   : 225391
-Parámetros              : k=20  min_co=3
+Usuarios usados aprox.  : 162541
+Tripletas leídas ok     : 24945870
+Pares (i,j) acumulados  : 6806796752
+Similitudes retenidas   : 531296
+Líneas escritas (CSV)   : 531296
 
 Tiempos:
-  Workers (acumular)    : 30.5925726s
-  Top-K por ítem        : 5.5362893s
-  Escribir CSV          : 0s
-  TOTAL                 : 36.1288619s
+  Paso 1: Calcular normas     : (incluido antes de t0)
+  Lectura + envío jobs        : 17m58.3328632s
+  Fusionar shards             : 4m6.6530415s
+  Top-K por ítem              : 2m19.8830721s
+  Escribir CSV                : 391.5032ms
+  TOTAL                       : 24m25.26048s
 
 Salida CSV:
   artifacts/sim/item_topk_cosine_conc.csv

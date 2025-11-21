@@ -1,0 +1,15 @@
+== PEARSON ITEM-BASED (secuencial, muestreado; centrado por ítem) ==
+pct_users / pct_items :   25% / 100%
+Usuarios usados       :   40646
+Tripletas leídas ok   :   6262013
+Pares i-j actualizados:   1800009108
+Líneas escritas (CSV) :   311406
+Parámetros            :   k=20  min_co=3
+
+Tiempos:
+  Medias por ítem     :   0s
+  Acumular por usuario:   3m47.3999922s
+  Escribir CSV        :   100.7701ms
+  TOTAL               :   3m57.8450782s
+Salida:
+  artifacts/sim/item_topk_pearson.csv

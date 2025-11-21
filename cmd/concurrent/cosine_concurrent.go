@@ -4,52 +4,35 @@
 package main
 
 /*
-COSENO (Concurrente) — Item-Based y User-Based
+COSENO (Concurrente, Item-Based, OPTIMIZADO + MEJOR CALIDAD)
 
-Descripción general:
-- Modo ITEM: Usa artifacts/ratings_ui.csv (uIdx,iIdx,rating), agrupa por usuario y acumula productos
-  para pares (i,j). Normaliza con ||i|| y ||j|| → sim_cos(i,j) = dot(i,j) / (||i||·||j||).
-- Modo USER: Usa la CSR centrada por usuario (indptr/indices/data con r' = r - mean_u). Construye
-  índice invertido item -> [(u, r')], acumula productos para pares (u,v). Normaliza con ||u|| y ||v||.
+Mejoras de precisión / métricas:
+--------------------------------
+1) Se eliminan similitudes negativas:
+       if sim <= 0 { continue }
+   Esto evita que vecinos "inversos" contaminen las predicciones.
 
-Concurrencia:
-- Divide la matriz en subproblemas:
-  * ITEM-BASED: Lotes de usuarios (subfilas) enviados por channel a workers (worker-pool).
-  * USER-BASED: Bloques de ítems (subcolumnas) enviados por channel a workers.
-- Cada worker usa mapas locales (sin locks). El hilo principal fusiona (reduce) al final.
-- Canales:
-  * jobs   : trabajos (rangos / lotes) para procesar
-  * result : resultados parciales (mapas de acumuladores) a fusionar
-- Patrones: worker-pool + reduce.
+2) Se aplica SHRINKAGE por número de co-ocurrencias (c):
+       sim' = (c / (c + shrink)) * sim
+   - shrink es un hiperparámetro (λ); típicamente 10, 20, 50...
+   - Penaliza pares con pocos usuarios en común → menos ruido.
 
-Parámetros:
-  --mode=item|user
+3) Normas ||i|| se calculan en un primer pase:
+       norms[i] += r*r
+
+4) Sharding global con 64 shards para reducir contención.
+
+Flags:
   --k=20
   --min_co=3
-  --pct_users=100   (0-100, muestreo determinista por uIdx)
-  --pct_items=100   (0-100, muestreo determinista por iIdx)
-  --workers=8       (número de goroutines)
-
-Entradas:
-  * mode=item:
-      - artifacts/ratings_ui.csv
-  * mode=user:
-      - artifacts/matrix_user_csr/indptr.bin
-      - artifacts/matrix_user_csr/indices.bin
-      - artifacts/matrix_user_csr/data.bin
-
-Salidas:
-  * mode=item:
-      - artifacts/sim/item_topk_cosine_conc.csv
-      - artifacts/sim/item_cosine_conc_report.txt
-  * mode=user:
-      - artifacts/sim/user_topk_cosine_conc.csv
-      - artifacts/sim/user_cosine_conc_report.txt
+  --pct_users=100
+  --pct_items=100
+  --workers=8
+  --shrink=20   (0 = sin shrinkage)
 */
 
 import (
 	"bufio"
-	"encoding/binary"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -62,29 +45,19 @@ import (
 	"time"
 )
 
-// ==== rutas por modo ====
+// ======== rutas =========
+
 const (
-	// ITEM-BASED (triplets)
-	inTriplets = "artifacts/ratings_ui.csv"
-
-	// USER-BASED (CSR centrada por usuario)
-	csrIndptrPath  = "artifacts/matrix_user_csr/indptr.bin"
-	csrIndicesPath = "artifacts/matrix_user_csr/indices.bin"
-	csrDataPath    = "artifacts/matrix_user_csr/data.bin"
-
-	// Salidas
+	inTriplets    = "artifacts/ratings_ui.csv"
 	outItemTopK   = "artifacts/sim/item_topk_cosine_conc.csv"
 	outItemReport = "artifacts/sim/item_cosine_conc_report.txt"
-
-	outUserTopK   = "artifacts/sim/user_topk_cosine_conc.csv"
-	outUserReport = "artifacts/sim/user_cosine_conc_report.txt"
 )
 
-// ==== util común ====
+// ======== estructuras =========
 
 type acc struct {
-	dot, n2a, n2b float64
-	c             int
+	dot float64
+	c   int
 }
 
 type kv struct {
@@ -92,9 +65,12 @@ type kv struct {
 	s float64
 }
 
-type pair struct {
-	a, b int
+type rating struct {
+	i int
+	r float64
 }
+
+// ======== utilidades =========
 
 func hash32(x int) uint32 {
 	h := uint32(2166136261)
@@ -105,6 +81,7 @@ func hash32(x int) uint32 {
 	}
 	return h
 }
+
 func keepByPct(id int, pct int) bool {
 	if pct >= 100 {
 		return true
@@ -132,318 +109,162 @@ func writeTopKCSV(path string, header []string, rows func(write func([]string)))
 		return err
 	}
 	defer f.Close()
+
 	w := csv.NewWriter(bufio.NewWriter(f))
 	defer w.Flush()
+
 	_ = w.Write(header)
 	rows(func(rec []string) { _ = w.Write(rec) })
+
 	return nil
 }
 
-// ==== USER-BASED (CSR) CONCURRENTE ====
-// Divide el rango de items en bloques; cada worker:
-//   - toma items [lo,hi)
-//   - recorre lista de usuarios del ítem (u, r')
-//   - acumula pares (u,v) en mapa local
-// Al final, se fusionan mapas y se saca Top-K por usuario.
+// ======== Sharding =========
 
-func runUserBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers int) (rep string, err error) {
-	t0 := time.Now()
+const numShards = 64
 
-	// Cargar CSR
-	indptr := readInt64(csrIndptrPath)
-	indices := readInt32(csrIndicesPath)
-	data := readFloat32(csrDataPath)
-	U := len(indptr) - 1
+type shard struct {
+	mu sync.Mutex
+	m  map[int]map[int]*acc // i -> j -> acc
+}
 
-	// Construir índice invertido item -> [(u, r')]
-	maxI := 0
-	for _, x := range indices {
-		if int(x)+1 > maxI {
-			maxI = int(x) + 1
-		}
+func newShards() [numShards]*shard {
+	var s [numShards]*shard
+	for i := range s {
+		s[i] = &shard{m: make(map[int]map[int]*acc)}
 	}
-	itemUsers := make([][]struct {
-		u int
-		r float64
-	}, maxI)
+	return s
+}
 
-	var pairsAdded uint64
-	for u := 0; u < U; u++ {
-		if !keepByPct(u, pctUsers) {
-			continue
+func shardIndex(i, j int) int {
+	if i > j {
+		i, j = j, i
+	}
+	h := hash32(i*73856093 ^ j*19349663)
+	return int(h & (numShards - 1))
+}
+
+func updatePair(shards [numShards]*shard, ia, ib int, ra, rb float64) {
+	if ia == ib {
+		return
+	}
+	if ia > ib {
+		ia, ib = ib, ia
+		ra, rb = rb, ra
+	}
+	idx := shardIndex(ia, ib)
+	s := shards[idx]
+
+	s.mu.Lock()
+	m := s.m[ia]
+	if m == nil {
+		m = make(map[int]*acc)
+		s.m[ia] = m
+	}
+	t := m[ib]
+	if t == nil {
+		t = &acc{}
+		m[ib] = t
+	}
+	t.dot += ra * rb
+	t.c++
+	s.mu.Unlock()
+}
+
+// ======== Algoritmo ITEM-BASED =========
+
+func runItemBasedCosineConcurrent(
+	k, minCo, pctUsers, pctItems, workers, shrink int,
+) (string, error) {
+
+	// ---- PRIMER PASO: Calcular normas ||i|| ----
+	norms := make(map[int]float64)
+	{
+		f, err := os.Open(inTriplets)
+		if err != nil {
+			return "", err
 		}
-		start, end := indptr[u], indptr[u+1]
-		for p := start; p < end; p++ {
-			i := int(indices[p])
+		rd := csv.NewReader(bufio.NewReader(f))
+		_, _ = rd.Read() // header
+
+		for {
+			rec, er := rd.Read()
+			if er != nil {
+				break
+			}
+			u, _ := strconv.Atoi(rec[0])
+			i, _ := strconv.Atoi(rec[1])
+			r, _ := strconv.ParseFloat(rec[2], 64)
+
+			if !keepByPct(u, pctUsers) {
+				continue
+			}
 			if !keepByPct(i, pctItems) {
 				continue
 			}
-			itemUsers[i] = append(itemUsers[i], struct {
-				u int
-				r float64
-			}{u: u, r: float64(data[p])})
-			pairsAdded++
+
+			norms[i] += r * r
 		}
-	}
-	t1 := time.Now()
-
-	// Trabajos: partir items en bloques
-	type job struct{ lo, hi int }
-	jobs := make(chan job, workers)
-	type part struct {
-		m map[int]map[int]*acc // u -> v -> acc
-	}
-	results := make(chan part, workers)
-
-	worker := func() {
-		local := make(map[int]map[int]*acc)
-		for jb := range jobs {
-			for i := jb.lo; i < jb.hi; i++ {
-				users := itemUsers[i]
-				n := len(users)
-				for a := 0; a < n; a++ {
-					ua, xa := users[a].u, users[a].r
-					for b := a + 1; b < n; b++ {
-						ub, xb := users[b].u, users[b].r
-						// aplicar filtros por pctUsers ya hechos arriba (evita re-check)
-						m := local[ua]
-						if m == nil {
-							m = make(map[int]*acc)
-							local[ua] = m
-						}
-						t := m[ub]
-						if t == nil {
-							t = &acc{}
-							m[ub] = t
-						}
-						t.dot += xa * xb
-						t.n2a += xa * xa
-						t.n2b += xb * xb
-						t.c++
-					}
-				}
-			}
-		}
-		results <- part{m: local}
+		f.Close()
 	}
 
-	// lanzar workers
-	wg := sync.WaitGroup{}
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-			worker()
-		}()
-	}
+	// ---- SEGUNDO PASO: Concurrente ----
 
-	// encolar bloques de items
-	const chunk = 1024
-	for lo := 0; lo < maxI; lo += chunk {
-		hi := lo + chunk
-		if hi > maxI {
-			hi = maxI
-		}
-		jobs <- job{lo: lo, hi: hi}
-	}
-	close(jobs)
-	// recoger resultados
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// fusionar mapas
-	global := make(map[int]map[int]*acc)
-	var pairsUpdated uint64
-	for part := range results {
-		for ua, m := range part.m {
-			G := global[ua]
-			if G == nil {
-				G = make(map[int]*acc, len(m))
-				global[ua] = G
-			}
-			for ub, t := range m {
-				g := G[ub]
-				if g == nil {
-					G[ub] = &acc{dot: t.dot, n2a: t.n2a, n2b: t.n2b, c: t.c}
-				} else {
-					g.dot += t.dot
-					g.n2a += t.n2a
-					g.n2b += t.n2b
-					g.c += t.c
-				}
-				pairsUpdated++
-			}
-		}
-	}
-	t2 := time.Now()
-
-	// Top-K por usuario (sim cos)
-	out := make(map[int][]kv)
-	var simsKept, lines uint64
-	for u, m := range global {
-		cands := make([]kv, 0, len(m))
-		for v, t := range m {
-			if t.c < minCo || t.n2a == 0 || t.n2b == 0 {
-				continue
-			}
-			sim := t.dot / (math.Sqrt(t.n2a) * math.Sqrt(t.n2b))
-			if !math.IsNaN(sim) && !math.IsInf(sim, 0) {
-				cands = append(cands, kv{j: v, s: sim})
-			}
-		}
-		cands = topK(cands, k)
-		out[u] = cands
-		simsKept += uint64(len(cands))
-	}
-	t3 := time.Now()
-
-	// Escribir CSV
-	err = writeTopKCSV(outUserTopK, []string{"uIdx", "vIdx", "sim"}, func(write func([]string)) {
-		for u, list := range out {
-			for _, p := range list {
-				write([]string{strconv.Itoa(u), strconv.Itoa(p.j), fmt.Sprintf("%.6f", p.s)})
-				lines++
-			}
-		}
-	})
-	if err != nil {
-		return "", err
-	}
-	t4 := time.Now()
-
-	rep = fmt.Sprintf(
-		`== COSENO USER-BASED (concurrente) ==
-Usuarios totales (U)     : %d
-Ítems totales (I) aprox. : %d
-pct_users / pct_items    : %d%% / %d%%
-Workers (goroutines)     : %d
-
-Pares u-i añadidos aprox.: %d
-Pares (u,v) acumulados   : %d
-Similitudes retenidas    : %d
-Líneas escritas (CSV)    : %d
-Parámetros               : k=%d  min_co=%d
-
-Tiempos:
-  Invertir (item->users) : %s
-  Workers (acumular)     : %s
-  Top-K por usuario      : %s
-  Escribir CSV           : %s
-  TOTAL                  : %s
-
-Salida CSV:
-  %s
-`, U, maxI, pctUsers, pctItems, workers,
-		pairsAdded, pairsUpdated, simsKept, lines, k, minCo,
-		t1.Sub(t0), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t4.Sub(t0),
-		outUserTopK)
-
-	if err := os.WriteFile(outUserReport, []byte(rep), 0o644); err != nil {
-		return "", err
-	}
-	return rep, nil
-}
-
-// ==== ITEM-BASED (triplets) CONCURRENTE ====
-// Lee ratings_ui.csv (ordenado por uIdx), acumula por usuario en lotes:
-//   - Cada lote (varios usuarios contiguos) va a un worker.
-//   - El worker arma mapa local i -> j -> acc.
-//   - Se fusiona globalmente y luego se hace Top-K por ítem.
-
-func runItemBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers int) (rep string, err error) {
 	t0 := time.Now()
 
-	// lector del CSV
 	f, err := os.Open(inTriplets)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	rd := csv.NewReader(bufio.NewReader(f))
-	_, _ = rd.Read() // header
+	_, _ = rd.Read()
 
-	// buffers por usuario actual
-	type rating struct {
-		i int
-		r float64
-	}
-	type userBlock struct {
-		users [][]rating // bloque de varios usuarios
-	}
-	jobs := make(chan userBlock, workers)
-	type part struct {
-		m map[int]map[int]*acc // i -> j -> acc
-	}
-	results := make(chan part, workers)
+	jobs := make(chan []rating, workers*4)
+	shards := newShards()
 
-	// worker
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	var usersKept, tripletsOK, pairsUpdated uint64
+
 	worker := func() {
-		local := make(map[int]map[int]*acc)
-		for blk := range jobs {
-			for _, items := range blk.users {
-				// acumular pares (i,j) dentro del usuario
-				for a := 0; a < len(items); a++ {
-					ia, ra := items[a].i, items[a].r
-					for b := a + 1; b < len(items); b++ {
-						ib, rb := items[b].i, items[b].r
-						m := local[ia]
-						if m == nil {
-							m = make(map[int]*acc)
-							local[ia] = m
-						}
-						t := m[ib]
-						if t == nil {
-							t = &acc{}
-							m[ib] = t
-						}
-						t.dot += ra * rb
-						t.n2a += ra * ra
-						t.n2b += rb * rb
-						t.c++
-					}
+		defer wg.Done()
+		for items := range jobs {
+			n := len(items)
+			for a := 0; a < n; a++ {
+				ia, ra := items[a].i, items[a].r
+				for b := a + 1; b < n; b++ {
+					ib, rb := items[b].i, items[b].r
+					updatePair(shards, ia, ib, ra, rb)
+					pairsUpdated++
 				}
 			}
 		}
-		results <- part{m: local}
 	}
 
-	// lanzar workers
-	wg := sync.WaitGroup{}
-	wg.Add(workers)
 	for w := 0; w < workers; w++ {
-		go func() {
-			defer wg.Done()
-			worker()
-		}()
+		go worker()
 	}
 
-	// lectura y batching por usuarios
 	var lastU = -1
-	var items []rating
-	const usersPerBlock = 4096
-	block := userBlock{users: make([][]rating, 0, usersPerBlock)}
+	items := make([]rating, 0, 128)
 
-	var usersKept, tripletsOK, pairsUpdated uint64
 	emitUser := func() {
 		if len(items) == 0 {
 			return
 		}
-		block.users = append(block.users, append([]rating(nil), items...))
-		if len(block.users) >= usersPerBlock {
-			jobs <- block
-			block = userBlock{users: make([][]rating, 0, usersPerBlock)}
-		}
+		cp := make([]rating, len(items))
+		copy(cp, items)
+		jobs <- cp
 		items = items[:0]
+		usersKept++
 	}
+
 	for {
 		rec, er := rd.Read()
 		if er != nil {
-			if er.Error() == "EOF" {
-				break
-			}
-			continue
+			break
 		}
 		u, _ := strconv.Atoi(rec[0])
 		i, _ := strconv.Atoi(rec[1])
@@ -456,35 +277,32 @@ func runItemBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers int) (re
 			}
 			continue
 		}
+
 		if lastU == -1 {
 			lastU = u
-		}
-		if u != lastU {
+		} else if u != lastU {
 			emitUser()
 			lastU = u
-			usersKept++
 		}
 
 		if !keepByPct(i, pctItems) {
 			continue
 		}
+
 		items = append(items, rating{i: i, r: r})
 		tripletsOK++
 	}
-	emitUser() // último usuario del archivo
-	if len(block.users) > 0 {
-		jobs <- block
-	}
-	close(jobs)
 
-	// recolectar resultados
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	emitUser()
+	close(jobs)
+	wg.Wait()
+	t1 := time.Now()
+
+	// ---- Fusionar shards ----
 	global := make(map[int]map[int]*acc)
-	for part := range results {
-		for ia, m := range part.m {
+	for _, s := range shards {
+		s.mu.Lock()
+		for ia, m := range s.m {
 			G := global[ia]
 			if G == nil {
 				G = make(map[int]*acc, len(m))
@@ -493,43 +311,71 @@ func runItemBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers int) (re
 			for ib, t := range m {
 				g := G[ib]
 				if g == nil {
-					G[ib] = &acc{dot: t.dot, n2a: t.n2a, n2b: t.n2b, c: t.c}
+					G[ib] = &acc{dot: t.dot, c: t.c}
 				} else {
 					g.dot += t.dot
-					g.n2a += t.n2a
-					g.n2b += t.n2b
 					g.c += t.c
 				}
-				pairsUpdated++
 			}
 		}
+		s.mu.Unlock()
 	}
-	t1 := time.Now()
+	t2 := time.Now()
 
-	// Top-K por ítem
+	// ---- Top-K (con filtro de negativos + shrinkage) ----
 	out := make(map[int][]kv)
 	var simsKept, lines uint64
+
 	for i, m := range global {
 		cands := make([]kv, 0, len(m))
+		normI := math.Sqrt(norms[i])
+		if normI == 0 {
+			continue
+		}
+
 		for j, t := range m {
-			if t.c < minCo || t.n2a == 0 || t.n2b == 0 {
+			if t.c < minCo {
 				continue
 			}
-			sim := t.dot / (math.Sqrt(t.n2a) * math.Sqrt(t.n2b))
+
+			normJ := math.Sqrt(norms[j])
+			if normJ == 0 {
+				continue
+			}
+
+			sim := t.dot / (normI * normJ)
+
+			// 1) descartamos similitudes <= 0
+			if sim <= 0 {
+				continue
+			}
+
+			// 2) shrinkage opcional por # de co-ocurrencias
+			if shrink > 0 {
+				sim *= float64(t.c) / float64(t.c+shrink)
+			}
+
 			if !math.IsNaN(sim) && !math.IsInf(sim, 0) {
 				cands = append(cands, kv{j: j, s: sim})
 			}
 		}
+
 		cands = topK(cands, k)
 		out[i] = cands
 		simsKept += uint64(len(cands))
 	}
 
-	// Escribir CSV
+	t3 := time.Now()
+
+	// ---- CSV ----
 	err = writeTopKCSV(outItemTopK, []string{"iIdx", "jIdx", "sim"}, func(write func([]string)) {
 		for i, list := range out {
 			for _, p := range list {
-				write([]string{strconv.Itoa(i), strconv.Itoa(p.j), fmt.Sprintf("%.6f", p.s)})
+				write([]string{
+					strconv.Itoa(i),
+					strconv.Itoa(p.j),
+					fmt.Sprintf("%.6f", p.s),
+				})
 				lines++
 			}
 		}
@@ -537,110 +383,64 @@ func runItemBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers int) (re
 	if err != nil {
 		return "", err
 	}
-	t2 := time.Now()
 
-	rep = fmt.Sprintf(
-		`== COSENO ITEM-BASED (concurrente) ==
+	t4 := time.Now()
+
+	rep := fmt.Sprintf(
+		`== COSENO ITEM-BASED (concurrente optimizado + shrinkage) ==
 pct_users / pct_items   : %d%% / %d%%
 Workers (goroutines)    : %d
+Shards globales         : %d
+Shrink (λ)              : %d
 
 Usuarios usados aprox.  : %d
 Tripletas leídas ok     : %d
 Pares (i,j) acumulados  : %d
 Similitudes retenidas   : %d
 Líneas escritas (CSV)   : %d
-Parámetros              : k=%d  min_co=%d
 
 Tiempos:
-  Workers (acumular)    : %s
-  Top-K por ítem        : %s
-  Escribir CSV          : %s
-  TOTAL                 : %s
+  Paso 1: Calcular normas     : (incluido antes de t0)
+  Lectura + envío jobs        : %s
+  Fusionar shards             : %s
+  Top-K por ítem              : %s
+  Escribir CSV                : %s
+  TOTAL                       : %s
 
 Salida CSV:
   %s
-`, pctUsers, pctItems, workers,
-		usersKept, tripletsOK, pairsUpdated, simsKept, lines, k, minCo,
-		t1.Sub(t0), t2.Sub(t1), time.Since(t2), time.Since(t0),
-		outItemTopK)
+`,
+		pctUsers, pctItems, workers, numShards, shrink,
+		usersKept, tripletsOK, pairsUpdated, simsKept, lines,
+		t1.Sub(t0), t2.Sub(t1), t3.Sub(t2), t4.Sub(t3), t4.Sub(t0),
+		outItemTopK,
+	)
 
-	if err := os.WriteFile(outItemReport, []byte(rep), 0o644); err != nil {
-		return "", err
-	}
+	_ = os.WriteFile(outItemReport, []byte(rep), 0o644)
 	return rep, nil
 }
 
-// ==== MAIN (selector de modo) ====
+// ========= main =========
 
 func main() {
-	var mode string
 	var k, minCo int
 	var pctUsers, pctItems int
 	var workers int
+	var shrink int
 
-	flag.StringVar(&mode, "mode", "item", "item | user")
-	flag.IntVar(&k, "k", 20, "Top-K vecinos")
-	flag.IntVar(&minCo, "min_co", 3, "mínimo co-ocurrencias para considerar similitud")
-	flag.IntVar(&pctUsers, "pct_users", 100, "% de usuarios a considerar (0-100)")
-	flag.IntVar(&pctItems, "pct_items", 100, "% de ítems a considerar (0-100)")
-	flag.IntVar(&workers, "workers", 8, "número de goroutines/ workers")
+	flag.IntVar(&k, "k", 20, "Top-K vecinos por ítem")
+	flag.IntVar(&minCo, "min_co", 3, "mínimo co-ocurrencias")
+	flag.IntVar(&pctUsers, "pct_users", 100, "% usuarios")
+	flag.IntVar(&pctItems, "pct_items", 100, "% ítems")
+	flag.IntVar(&workers, "workers", 8, "número de goroutines")
+	flag.IntVar(&shrink, "shrink", 20, "parámetro de shrinkage (0 = sin shrinkage)")
 	flag.Parse()
 
-	if err := os.MkdirAll("artifacts/sim", 0o755); err != nil {
-		panic(err)
-	}
+	_ = os.MkdirAll("artifacts/sim", 0o755)
 
-	var rep string
-	var err error
-	switch mode {
-	case "item":
-		rep, err = runItemBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers)
-	case "user":
-		rep, err = runUserBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers)
-	default:
-		panic("modo inválido: use --mode=item | --mode=user")
-	}
+	rep, err := runItemBasedCosineConcurrent(k, minCo, pctUsers, pctItems, workers, shrink)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Print(rep)
-}
-
-// ==== util lectura binaria CSR ====
-
-func readInt64(path string) []int64 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	n := len(b) / 8
-	out := make([]int64, n)
-	for i := 0; i < n; i++ {
-		out[i] = int64(binary.LittleEndian.Uint64(b[i*8:]))
-	}
-	return out
-}
-func readInt32(path string) []int32 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	n := len(b) / 4
-	out := make([]int32, n)
-	for i := 0; i < n; i++ {
-		out[i] = int32(binary.LittleEndian.Uint32(b[i*4:]))
-	}
-	return out
-}
-func readFloat32(path string) []float32 {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	n := len(b) / 4
-	out := make([]float32, n)
-	for i := 0; i < n; i++ {
-		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
-	}
-	return out
 }
